@@ -19,7 +19,11 @@ async def main() -> None:
     await db.init()
 
     client = TelegramClient(StringSession(config.SESSION_STRING), config.API_ID, config.API_HASH)
-    await client.start()
+    await client.connect()
+    if not await client.is_user_authorized():
+        raise SystemExit(
+            "SESSION_STRING пустой или недействительный. Сгенерируй заново: python generate_session.py, "
+            "и вставь в Railway Variables только саму строку (без 'SESSION_STRING=' и без кавычек).")
 
     bot = Bot(config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 
