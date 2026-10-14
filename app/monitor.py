@@ -1,17 +1,26 @@
 """Мониторинг новых улучшенных подарков через MTProto (Telethon).
 
-Принцип: у каждой коллекции улучшенные подарки нумеруются подряд (PlushPepe-1, -2, ...).
-Храним последний известный номер и каждый цикл проверяем last+1. Если подарок существует -
-это новое улучшение.
+У каждой коллекции улучшенные подарки нумеруются подряд (PlushPepe-1, -2, ...).
+Храним последний известный номер и проверяем last+1. Если подарок существует - это новое улучшение.
+
+Чтобы Telegram не сбрасывал сессию за частые запросы:
+  * один глобальный лимитер запросов (RPS) на всё приложение;
+  * адаптивные интервалы: "горячие" коллекции опрашиваются чаще, "холодные" реже;
+  * случайный разброс (jitter) и штраф к скорости после FloodWait;
+  * проверка по одной коллекции за раз, без пачек параллельных запросов.
 """
 import asyncio
 import logging
+import random
 import re
 import time
 from typing import Awaitable, Callable
 
 from telethon import TelegramClient
-from telethon.errors import FloodWaitError, RPCError
+from telethon.errors import (
+    AuthKeyDuplicatedError, AuthKeyUnregisteredError, FloodWaitError, RPCError,
+    SessionExpiredError, SessionRevokedError, UserDeactivatedBanError, UserDeactivatedError,
+)
 from telethon.tl.functions.payments import (
     GetResaleStarGiftsRequest,
     GetStarGiftsRequest,
@@ -21,6 +30,9 @@ from telethon.tl.functions.payments import (
 from . import config, db
 
 log = logging.getLogger("monitor")
+
+FATAL = (AuthKeyDuplicatedError, AuthKeyUnregisteredError, SessionRevokedError,
+         SessionExpiredError, UserDeactivatedError, UserDeactivatedBanError)
 
 
 def prefix_of(title: str) -> str:
@@ -64,12 +76,34 @@ def parse(g, prefix: str) -> dict:
     return d
 
 
+class Limiter:
+    """Глобальный ограничитель скорости запросов с штрафом после FloodWait."""
+
+    def __init__(self, rps: float):
+        self.gap = 1.0 / max(rps, 0.1)
+        self.penalty = 1.0
+        self._next = 0.0
+        self._lock = asyncio.Lock()
+
+    async def wait(self) -> None:
+        async with self._lock:
+            now = time.monotonic()
+            delay = max(0.0, self._next - now)
+            self._next = max(now, self._next) + self.gap * self.penalty
+            self.penalty = max(1.0, self.penalty * 0.98)  # штраф постепенно спадает
+        if delay:
+            await asyncio.sleep(delay)
+
+    def punish(self) -> None:
+        self.penalty = min(self.penalty * 2, 8.0)
+
+
 class Monitor:
     def __init__(self, client: TelegramClient, on_gift: Callable[[dict], Awaitable[None]]):
         self.client = client
         self.on_gift = on_gift
-        self.sem = asyncio.Semaphore(config.CONCURRENCY)
-        self.cursors: dict[str, int] = {}
+        self.limiter = Limiter(config.RPS)
+        self.state: dict[str, dict] = {}  # prefix -> {cursor, interval, next}
         self._floor: dict[int, tuple[float, int | None]] = {}
         self._last_refresh = 0.0
         self._tasks: set[asyncio.Task] = set()
@@ -77,14 +111,23 @@ class Monitor:
     # ---------- low level ----------
     async def fetch(self, slug: str):
         while True:
+            await self.limiter.wait()
             try:
                 r = await self.client(GetUniqueStarGiftRequest(slug=slug))
                 return r.gift
+            except FATAL as e:
+                raise SystemExit(
+                    f"Сессия Telegram сброшена ({type(e).__name__}). Сгенерируй новый SESSION_STRING "
+                    "и не используй его одновременно в двух местах.")
             except FloodWaitError as e:
-                log.warning("FloodWait %ss", e.seconds)
-                await asyncio.sleep(e.seconds + 1)
-            except RPCError:
-                return None  # STARGIFT_SLUG_INVALID и т.п. - такого номера ещё нет
+                self.limiter.punish()
+                log.warning("FloodWait %ss - замедляюсь", e.seconds)
+                await asyncio.sleep(e.seconds + 2)
+            except RPCError as e:
+                msg = str(e).upper()
+                if "STARGIFT" not in msg and "SLUG" not in msg:
+                    log.warning("RPC error on %s: %s", slug, e)
+                return None  # такого номера ещё нет
 
     async def exists(self, slug: str) -> bool:
         return await self.fetch(slug) is not None
@@ -113,6 +156,7 @@ class Monitor:
             return cached[1]
         val = None
         try:
+            await self.limiter.wait()
             r = await self.client(GetResaleStarGiftsRequest(
                 gift_id=gift_id, offset="", limit=1, sort_by_price=True))
             if r.gifts:
@@ -121,6 +165,8 @@ class Monitor:
                     amt = next((a.amount for a in amt if type(a).__name__ == "StarsAmount"), None)
                 if isinstance(amt, int):
                     val = amt
+        except FATAL:
+            raise
         except Exception as e:  # схема TL меняется - не роняем мониторинг
             log.debug("floor failed: %s", e)
         self._floor[gift_id] = (time.time(), val)
@@ -131,53 +177,82 @@ class Monitor:
         titles = set(config.COLLECTIONS)
         if not titles:
             try:
+                await self.limiter.wait()
                 r = await self.client(GetStarGiftsRequest(hash=0))
                 titles = {g.title for g in getattr(r, "gifts", []) if getattr(g, "title", None)}
+            except FATAL:
+                raise
             except Exception as e:
                 log.warning("discovery failed: %s", e)
-        self.cursors = await db.get_cursors()
-        for t in titles:
-            p = prefix_of(t)
-            if p and p not in self.cursors:
-                n = await self.find_max(p)
-                await db.set_cursor(p, n)
-                self.cursors[p] = n
-                log.info("new collection %s baseline=%s", p, n)
+        cursors = await db.get_cursors()
+        prefixes = {prefix_of(t) for t in titles if prefix_of(t)} | set(cursors)
+        for p in prefixes:
+            if p not in self.state:
+                self.state[p] = {
+                    "cursor": cursors.get(p),  # None = нужен стартовый поиск максимума
+                    "interval": config.MIN_INTERVAL,
+                    "next": time.monotonic() + random.uniform(0, config.MIN_INTERVAL),
+                }
         self._last_refresh = time.monotonic()
-        log.info("tracking %d collections", len(self.cursors))
+        log.info("tracking %d collections", len(self.state))
 
     # ---------- main loop ----------
     async def _emit(self, data: dict) -> None:
         try:
             data["floor"] = await self.floor(data.get("gift_id"))
             await self.on_gift(data)
+        except FATAL:
+            raise
         except Exception:
             log.exception("on_gift failed")
 
+    async def _advance(self, prefix: str, s: dict) -> bool:
+        found = False
+        n = s["cursor"] + 1
+        while True:
+            g = await self.fetch(f"{prefix}-{n}")
+            if g is None:
+                return found
+            data = parse(g, prefix)
+            s["cursor"] = n
+            await db.set_cursor(prefix, n)
+            if await db.save_gift(data):
+                t = asyncio.create_task(self._emit(data))
+                self._tasks.add(t)
+                t.add_done_callback(self._tasks.discard)
+            found = True
+            n += 1
+
     async def check(self, prefix: str) -> None:
-        async with self.sem:
-            n = self.cursors[prefix] + 1
-            while True:
-                g = await self.fetch(f"{prefix}-{n}")
-                if g is None:
-                    break
-                data = parse(g, prefix)
-                self.cursors[prefix] = n
-                await db.set_cursor(prefix, n)
-                if await db.save_gift(data):
-                    t = asyncio.create_task(self._emit(data))
-                    self._tasks.add(t)
-                    t.add_done_callback(self._tasks.discard)
-                n += 1
+        s = self.state[prefix]
+        found = False
+        if s["cursor"] is None:
+            s["cursor"] = await self.find_max(prefix)
+            await db.set_cursor(prefix, s["cursor"])
+            log.info("baseline %s=%s", prefix, s["cursor"])
+        else:
+            found = await self._advance(prefix, s)
+        # горячая коллекция - часто, пустая - всё реже
+        s["interval"] = config.MIN_INTERVAL if found else min(s["interval"] * 1.5, config.MAX_INTERVAL)
+        s["next"] = time.monotonic() + s["interval"] * random.uniform(0.8, 1.2)
 
     async def run(self) -> None:
         await self.refresh_collections()
         while True:
             if time.monotonic() - self._last_refresh > 1800:
                 await self.refresh_collections()
-            res = await asyncio.gather(*(self.check(p) for p in list(self.cursors)),
-                                       return_exceptions=True)
-            for r in res:
-                if isinstance(r, Exception):
-                    log.error("check error: %r", r)
-            await asyncio.sleep(config.POLL_INTERVAL)
+            if not self.state:
+                await asyncio.sleep(10)
+                continue
+            p = min(self.state, key=lambda k: self.state[k]["next"])
+            wait = self.state[p]["next"] - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(min(wait, 5))
+                continue
+            try:
+                await self.check(p)
+            except SystemExit:
+                raise
+            except Exception:
+                log.exception("check %s failed", p)
+                self.state[p]["next"] = time.monotonic() + config.MAX_INTERVAL

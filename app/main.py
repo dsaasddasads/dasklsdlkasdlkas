@@ -18,7 +18,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 async def main() -> None:
     await db.init()
 
-    client = TelegramClient(StringSession(config.SESSION_STRING), config.API_ID, config.API_HASH)
+    client = TelegramClient(StringSession(config.SESSION_STRING), config.API_ID, config.API_HASH,
+                            receive_updates=False)
     await client.connect()
     if not await client.is_user_authorized():
         raise SystemExit(

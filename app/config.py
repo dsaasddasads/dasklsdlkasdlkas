@@ -15,8 +15,10 @@ ADMIN_IDS = _ids(os.getenv("ADMIN_IDS", ""))
 PORT = int(os.getenv("PORT", "8080"))
 
 COLLECTIONS = [c.strip() for c in os.getenv("COLLECTIONS", "").split(",") if c.strip()]
-POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "3"))
-CONCURRENCY = int(os.getenv("CONCURRENCY", "8"))
+# Защита сессии от сброса: общий лимит запросов к Telegram и адаптивные интервалы опроса
+RPS = float(os.getenv("RPS", "2"))                      # макс. запросов в секунду на всё приложение
+MIN_INTERVAL = float(os.getenv("MIN_INTERVAL", "15"))   # как часто проверять "горячую" коллекцию, сек
+MAX_INTERVAL = float(os.getenv("MAX_INTERVAL", "120"))  # как редко проверять "холодную" коллекцию, сек
 
 # PAID_MODE=1 включает платный тариф; по умолчанию бот приватный (доступ по списку)
 PAID_MODE = os.getenv("PAID_MODE", "0") == "1"
