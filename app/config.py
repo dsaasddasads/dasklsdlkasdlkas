@@ -8,7 +8,7 @@ def _ids(v: str) -> set[int]:
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
-SESSION_STRING = os.environ["SESSION_STRING"]
+SESSION_STRING = os.environ["SESSION_STRING"].strip().strip("\"'").removeprefix("SESSION_STRING=").strip()
 DATABASE_URL = os.environ["DATABASE_URL"]
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").rstrip("/")
 ADMIN_IDS = _ids(os.getenv("ADMIN_IDS", ""))
