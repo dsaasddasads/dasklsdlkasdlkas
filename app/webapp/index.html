@@ -21,24 +21,27 @@
   .row { display:flex; gap:10px; } .row > div { flex:1; }
   button { width:100%; margin-top:14px; padding:14px; border:0; border-radius:14px; font-size:16px; font-weight:600;
            background:linear-gradient(135deg,#f3dd7a,#c9a227); color:#1a1400; }
+  button:disabled { opacity:.4; }
   button.alt { background:var(--card); color:var(--gold); border:1px solid #3a3320; }
+  button.stop { background:#3a1618; color:#ff8a8a; border:1px solid #6b2a2e; }
+  button.mini { width:auto; margin:0; padding:8px 12px; font-size:13px; }
   .status { padding:12px 14px; border-radius:14px; background:var(--card); font-size:14px; }
   .on { color:#6fdc8c; } .off { color:#ff7b7b; }
   .sw { display:flex; justify-content:space-between; align-items:center; margin-top:14px; }
+  .hint { font-size:12px; color:var(--muted); margin-top:6px; }
 </style>
 </head>
 <body>
-<h2>Преимущества</h2>
-<div class="card"><div class="ico">⚡</div><div><b>Моментальные листинги</b><span>Уведомления сразу после улучшения</span></div></div>
-<div class="card"><div class="ico">🔍</div><div><b>Точный поиск владельца</b><span>Показываем ссылку на владельца подарка</span></div></div>
-<div class="card"><div class="ico">★</div><div><b>Полное сопровождение</b><span>Помощь со сделками и инвайт в закрытый чат</span></div></div>
+<div class="status" id="state">Загрузка…</div>
+<button id="toggle" disabled>…</button>
 
+<div id="subbox">
 <h2>Подписка</h2>
-<div class="status" id="status">Загрузка…</div>
+<div class="status" id="status"></div>
 <div id="plans"></div>
+</div>
 
 <h2>Фильтры</h2>
-<div class="sw"><span>Уведомления включены</span><input type="checkbox" id="enabled" checked></div>
 <label>Коллекции (через запятую, пусто = все)</label>
 <input type="text" id="collections" placeholder="Plush Pepe, Heart Locket">
 <label>Модели</label>
@@ -49,12 +52,21 @@
   <div><label>Цена от (⭐)</label><input type="number" id="price_min" inputmode="numeric"></div>
   <div><label>Цена до (⭐)</label><input type="number" id="price_max" inputmode="numeric"></div>
 </div>
-<button id="save">Сохранить фильтры</button>
+
+<div class="sw"><span>🔥 Режим выгодных предложений</span><input type="checkbox" id="profit_mode"></div>
+<div class="hint">Только редкие подарки: хотя бы один признак (модель, фон или узор) не чаще порога ниже.</div>
+<label>Макс. редкость признака, %</label>
+<input type="number" id="profit_rarity" step="0.1" min="0.1" max="100" value="1">
+<button id="save">Сохранить</button>
+
+<h2>Избранное</h2>
+<div id="favs"></div>
 
 <script>
 const tg = window.Telegram.WebApp; tg.ready(); tg.expand();
 const H = { "Content-Type":"application/json", "X-Init-Data": tg.initData };
 const $ = id => document.getElementById(id);
+let ME = null;
 
 async function api(path, body) {
   const r = await fetch(path, body ? { method:"POST", headers:H, body:JSON.stringify(body) } : { headers:H });
@@ -63,12 +75,22 @@ async function api(path, body) {
 }
 
 async function load() {
-  const me = await api("/api/me");
-  $("status").innerHTML = me.active
-    ? '<span class="on">● Подписка активна</span> до ' + new Date(me.sub_until).toLocaleString()
+  ME = await api("/api/me");
+  $("subbox").style.display = ME.paid_mode ? "" : "none";
+  $("status").innerHTML = ME.active
+    ? (ME.sub_until ? '<span class="on">● Подписка активна</span> до ' + new Date(ME.sub_until).toLocaleString()
+                    : '<span class="on">● Доступ открыт</span>')
     : '<span class="off">● Подписки нет</span> — оформи, чтобы получать уведомления';
+  $("state").innerHTML = ME.enabled
+    ? '<span class="on">● Работа идёт</span> — уведомления включены'
+    : '<span class="off">● Остановлено</span> — уведомления выключены';
+  const t = $("toggle");
+  t.textContent = ME.enabled ? "⏹ Завершить работу" : "▶ Начать работу";
+  t.className = ME.enabled ? "stop" : "";
+  t.disabled = !ME.active;
+
   $("plans").innerHTML = "";
-  Object.entries(me.plans).forEach(([days, price]) => {
+  Object.entries(ME.plans).forEach(([days, price]) => {
     const b = document.createElement("button"); b.className = "alt";
     b.textContent = days + " дн. — " + price + " ⭐";
     b.onclick = async () => {
@@ -77,25 +99,59 @@ async function load() {
     };
     $("plans").appendChild(b);
   });
-  $("enabled").checked = me.enabled;
-  $("collections").value = me.collections.join(", ");
-  $("models").value = me.models.join(", ");
-  $("backdrops").value = me.backdrops.join(", ");
-  $("price_min").value = me.price_min ?? "";
-  $("price_max").value = me.price_max ?? "";
+
+  $("collections").value = ME.collections.join(", ");
+  $("models").value = ME.models.join(", ");
+  $("backdrops").value = ME.backdrops.join(", ");
+  $("price_min").value = ME.price_min ?? "";
+  $("price_max").value = ME.price_max ?? "";
+  $("profit_mode").checked = ME.profit_mode;
+  $("profit_rarity").value = ME.profit_rarity;
+  loadFavs();
 }
+
+async function loadFavs() {
+  const { items } = await api("/api/favorites");
+  const box = $("favs"); box.innerHTML = "";
+  if (!items.length) {
+    box.innerHTML = '<div class="status">Пока пусто. Жми «⭐ В избранное» под уведомлением.</div>';
+    return;
+  }
+  items.forEach(it => {
+    const row = document.createElement("div"); row.className = "card";
+    const info = document.createElement("div"); info.style.flex = "1";
+    const b = document.createElement("b"); b.textContent = it.collection + " #" + it.num;
+    const s = document.createElement("span"); s.textContent = [it.model, it.backdrop].filter(Boolean).join(" · ");
+    info.append(b, s);
+    const open = document.createElement("button"); open.className = "mini"; open.textContent = "Открыть";
+    open.onclick = () => tg.openTelegramLink("https://t.me/nft/" + it.slug);
+    const del = document.createElement("button"); del.className = "mini alt"; del.textContent = "✕";
+    del.onclick = async () => { await api("/api/favorites/remove", { slug: it.slug }); loadFavs(); };
+    row.append(info, open, del);
+    box.appendChild(row);
+  });
+}
+
+$("toggle").onclick = async () => {
+  try { await api("/api/toggle", { enabled: !ME.enabled }); } catch (e) { tg.showAlert("Нет доступа"); }
+  load();
+};
 
 $("save").onclick = async () => {
   await api("/api/filters", {
-    enabled: $("enabled").checked,
     collections: $("collections").value, models: $("models").value, backdrops: $("backdrops").value,
     price_min: $("price_min").value, price_max: $("price_max").value,
+    profit_mode: $("profit_mode").checked, profit_rarity: $("profit_rarity").value,
   });
   tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
-  tg.showAlert("Фильтры сохранены");
+  tg.showAlert("Сохранено");
 };
 
-load().catch(() => { $("status").textContent = "Открой приложение из бота"; });
+load().catch(e => {
+  $("state").textContent = e.message === "403"
+    ? "🔒 Приватный бот: доступ закрыт. Напиши владельцу."
+    : "Открой приложение из бота";
+});
 </script>
 </body>
 </html>

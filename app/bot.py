@@ -6,7 +6,7 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice,
-    Message, PreCheckoutQuery, WebAppInfo,
+    Message, PreCheckoutQuery,
 )
 from telethon import TelegramClient
 
@@ -16,44 +16,23 @@ log = logging.getLogger("bot")
 router = Router()
 
 WELCOME = (
-    "<b>Добро пожаловать в Gift Track Bot!</b>\n\n"
-    "<blockquote>Приватный инструмент для выкупа только что улучшенных Telegram-подарков.</blockquote>\n\n"
-    "<i>— мгновенные уведомления об улучшениях\n"
-    "— гибкие фильтры: модели, фона, коллекции, диапазон цен\n"
-    "— инвайт в закрытый чат и полное сопровождение по выкупам</i>\n\n"
-    "Чтобы открыть доступ — оформи подписку в приложении."
+    "<b>Gift Track Bot</b>\n\n"
+    "Приватный инструмент для выкупа только что улучшенных Telegram-подарков.\n\n"
+    "<b>Что умеет:</b>\n"
+    "— мгновенные уведомления о каждом улучшении\n"
+    "— точный поиск владельца: пишешь ему первым\n"
+    "— гибкие фильтры: коллекции, модели, фоны, диапазон цен\n"
+    "— режим выгодных предложений: только редкие подарки\n"
+    "— избранное: сохраняй подарки одной кнопкой\n"
+    "— старт и стоп работы в любой момент\n\n"
+    "Управление и подписка — в приложении (кнопка меню рядом с полем ввода)."
 )
-
-HELP = (
-    "<b>What can this bot do?</b>\n\n"
-    "Gift Track Bot — инструмент для выкупа только что улучшенных Telegram-подарков раньше остальных.\n\n"
-    "— Моментальные уведомления о каждом улучшенном подарке\n"
-    "— Точный поиск владельца, пишешь ему первым\n"
-    "— Гибкая настройка фильтров: модели, фона, коллекции, диапазон цен\n"
-    "— Полное сопровождение по выкупам и сделкам\n\n"
-    "Ты видишь улучшенный подарок первым и забираешь его дешевле всех."
-)
-
-
-def main_kb() -> InlineKeyboardMarkup:
-    rows = []
-    if config.WEBAPP_URL:
-        rows.append([InlineKeyboardButton(text="Открыть приложение",
-                                          web_app=WebAppInfo(url=config.WEBAPP_URL))])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def plans_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{d} дн. — {p} ⭐", callback_data=f"buy:{d}")]
-        for d, p in config.PLANS.items()
-    ])
 
 
 def invoice_args(days: int) -> dict:
     return dict(
         title=f"Подписка Gift Track · {days} дн.",
-        description="Доступ к мгновенным уведомлениям об улучшенных подарках, фильтрам и сопровождению сделок.",
+        description="Доступ к мгновенным уведомлениям об улучшенных подарках и фильтрам.",
         payload=f"sub:{days}",
         currency="XTR",
         prices=[LabeledPrice(label=f"{days} дней", amount=config.PLANS[days])],
@@ -65,27 +44,26 @@ def invoice_args(days: int) -> dict:
 @router.message(Command("start"))
 async def start(m: Message):
     await db.upsert_user(m.from_user.id, m.from_user.username)
-    await m.answer(WELCOME, reply_markup=main_kb())
-
-
-@router.message(Command("help"))
-async def help_(m: Message):
-    await m.answer(HELP, reply_markup=main_kb())
-
-
-@router.message(Command("sub"))
-async def sub(m: Message):
-    await db.upsert_user(m.from_user.id, m.from_user.username)
-    await m.answer("Выбери срок подписки:", reply_markup=plans_kb())
+    u = await db.get_user(m.from_user.id)
+    if not config.PAID_MODE and not db.has_access(m.from_user.id, u):
+        return await m.answer("🔒 Приватный бот. Доступ только по приглашению.\n"
+                              f"Твой ID: <code>{m.from_user.id}</code> — отправь его владельцу.")
+    await m.answer(WELCOME)
 
 
 @router.message(Command("status"))
 async def status(m: Message):
     u = await db.get_user(m.from_user.id)
-    if db.sub_active(u):
-        await m.answer(f"✅ Подписка активна до {u['sub_until']:%d.%m.%Y %H:%M} UTC")
+    if db.has_access(m.from_user.id, u):
+        state = "работает" if u and u["enabled"] else "остановлен"
+        until = ""
+        if config.PAID_MODE and u and db.sub_active(u):
+            until = f" Подписка до {u['sub_until']:%d.%m.%Y %H:%M} UTC."
+        await m.answer(f"✅ Доступ открыт. Бот {state}.{until}")
+    elif config.PAID_MODE:
+        await m.answer("Подписки нет. Оформи её в приложении.")
     else:
-        await m.answer("Подписки нет. /sub — оформить.")
+        await m.answer("🔒 Приватный бот. Доступа нет.")
 
 
 @router.message(Command("grant"))
@@ -100,18 +78,36 @@ async def grant(m: Message, command: CommandObject):
     await m.answer(f"Ок. {uid} — до {u['sub_until']:%d.%m.%Y %H:%M} UTC")
 
 
-# ---------- payments (Telegram Stars) ----------
-@router.callback_query(F.data.startswith("buy:"))
-async def buy(c: CallbackQuery, bot: Bot):
-    days = int(c.data.split(":")[1])
-    if days not in config.PLANS:
-        return await c.answer()
-    await bot.send_invoice(chat_id=c.from_user.id, **invoice_args(days))
-    await c.answer()
+@router.message(Command("allow"))
+async def allow(m: Message, command: CommandObject):
+    if m.from_user.id not in config.ADMIN_IDS:
+        return
+    try:
+        uid = int((command.args or "").strip())
+    except ValueError:
+        return await m.answer("Использование: /allow <user_id>\nЧеловек должен сначала нажать /start у бота.")
+    await db.set_allowed(uid, True)
+    await m.answer(f"✅ Доступ выдан: {uid}")
 
 
+@router.message(Command("deny"))
+async def deny(m: Message, command: CommandObject):
+    if m.from_user.id not in config.ADMIN_IDS:
+        return
+    try:
+        uid = int((command.args or "").strip())
+    except ValueError:
+        return await m.answer("Использование: /deny <user_id>")
+    await db.set_allowed(uid, False)
+    await db.set_enabled(uid, False)
+    await m.answer(f"⛔ Доступ закрыт: {uid}")
+
+
+# ---------- payments (Telegram Stars, только PAID_MODE=1) ----------
 @router.pre_checkout_query()
 async def pre_checkout(q: PreCheckoutQuery):
+    if not config.PAID_MODE:
+        return await q.answer(ok=False, error_message="Платный режим выключен")
     await q.answer(ok=True)
 
 
@@ -120,61 +116,65 @@ async def paid(m: Message):
     days = int(m.successful_payment.invoice_payload.split(":")[1])
     u = await db.extend_sub(m.from_user.id, days)
     await m.answer(f"✅ Оплачено. Подписка активна до {u['sub_until']:%d.%m.%Y %H:%M} UTC.\n"
-                   "Настрой фильтры в приложении.", reply_markup=main_kb())
+                   "Открой приложение, настрой фильтры и нажми «Начать работу».")
 
 
-# ---------- deals ----------
-@router.callback_query(F.data.startswith("deal:"))
-async def deal(c: CallbackQuery, bot: Bot, monitor):
-    u = await db.get_user(c.from_user.id)
-    if not db.sub_active(u):
-        return await c.answer("Нужна активная подписка", show_alert=True)
-    slug = c.data.split(":", 1)[1]
-    await c.answer("Создаю чат…")
-    deal_id = await db.create_deal(slug, c.from_user.id)
-    try:
-        link = await monitor.create_deal_chat(f"Сделка #{deal_id} · {slug}")
-    except Exception as e:
-        log.exception("deal chat failed")
-        return await bot.send_message(c.from_user.id, f"Не удалось создать чат: {e}")
-    await db.set_deal_link(deal_id, link)
-    text = (f"🤝 <b>Сделка #{deal_id}</b>\n🎁 https://t.me/nft/{slug}\n"
-            f"Закрытый чат: {link}\n\nПригласи владельца в чат — гарант подключится.")
-    await bot.send_message(c.from_user.id, text)
-    for admin in config.ADMIN_IDS:
-        try:
-            await bot.send_message(admin, text + f"\nПокупатель: <code>{c.from_user.id}</code>")
-        except Exception:
-            pass
+# ---------- favorites ----------
+@router.callback_query(F.data.startswith("fav:"))
+async def fav(c: CallbackQuery):
+    added = await db.toggle_fav(c.from_user.id, c.data[4:])
+    await c.answer("⭐ Добавлено в избранное" if added else "Убрано из избранного")
 
 
-# ---------- notifications ----------
+# ---------- matching ----------
 def _ok(selected: list[str], value: str | None) -> bool:
     if not selected:
         return True
     return bool(value) and any(s.lower() in value.lower() for s in selected)
 
 
+def eff_price(d: dict) -> int | None:
+    return d["ask"] if d.get("ask") is not None else d.get("floor")
+
+
+def min_rarity(d: dict) -> int | None:
+    vals = [d[k] for k in ("model_rarity", "backdrop_rarity", "symbol_rarity") if d.get(k) is not None]
+    return min(vals) if vals else None
+
+
 def matches(u: dict, d: dict) -> bool:
     if not (_ok(u["collections"], d["collection"]) and _ok(u["models"], d["model"])
             and _ok(u["backdrops"], d["backdrop"])):
         return False
-    p = d.get("price")
-    if p is not None:  # если цена неизвестна — не пропускаем подарок
+    p = eff_price(d)
+    if p is not None:  # если цена неизвестна — подарок не отсекаем
         if u["price_min"] is not None and p < u["price_min"]:
             return False
         if u["price_max"] is not None and p > u["price_max"]:
             return False
+    if u["profit_mode"]:
+        r = min_rarity(d)  # в промилле: 10 = 1%
+        if r is None or r > u["profit_rarity"] * 10:
+            return False
+        ask, floor = d.get("ask"), d.get("floor")
+        if ask is not None and floor is not None and ask > floor * 1.5:
+            return False  # выставлен сильно дороже флора - не выгодно
     return True
 
 
+# ---------- notifications ----------
 def _pct(r: int | None) -> str:
     return f" ({r / 10:g}%)" if r is not None else ""
 
 
 def render(d: dict) -> str:
     e = html.escape
-    price = f"{d['price']} ⭐ (флор коллекции)" if d.get("price") else "нет данных"
+    if d.get("ask") is not None:
+        price = f"{d['ask']} ⭐ (цена в листинге)"
+    elif d.get("floor") is not None:
+        price = f"~{d['floor']} ⭐ (флор коллекции)"
+    else:
+        price = "нет данных"
     if d.get("owner_name"):
         owner = e(d["owner_name"])
     elif d.get("owner_address"):
@@ -188,7 +188,7 @@ def render(d: dict) -> str:
         f"Фон: <b>{e(d['backdrop'] or '—')}</b>{_pct(d['backdrop_rarity'])}\n"
         f"Узор: <b>{e(d['symbol'] or '—')}</b>{_pct(d['symbol_rarity'])}\n"
         f"Выпуск: {d['num']}{total}\n"
-        f"Ориентир цены: {price}\n"
+        f"Цена: {price}\n"
         f"Владелец: {owner}"
     )
 
@@ -214,7 +214,7 @@ async def broadcast(bot: Bot, client: TelegramClient, d: dict) -> None:
     url = await owner_url(client, d)
     if url:
         rows.append([InlineKeyboardButton(text="👤 Написать владельцу", url=url)])
-    rows.append([InlineKeyboardButton(text="🤝 Сопроводить сделку", callback_data=f"deal:{d['slug']}")])
+    rows.append([InlineKeyboardButton(text="⭐ В избранное", callback_data=f"fav:{d['slug']}")])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
     text = render(d)
     for u in users:
@@ -222,5 +222,5 @@ async def broadcast(bot: Bot, client: TelegramClient, d: dict) -> None:
             await bot.send_message(u["user_id"], text, reply_markup=kb)
         except Exception as e:
             log.debug("send to %s failed: %s", u["user_id"], e)
-        await asyncio.sleep(0.04)  # ~25 msg/s, в пределах лимита Bot API
+        await asyncio.sleep(0.04)
     log.info("%s -> %d users", d["slug"], len(users))

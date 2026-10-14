@@ -12,8 +12,6 @@ from typing import Awaitable, Callable
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, RPCError
-from telethon.tl.functions.channels import CreateChannelRequest
-from telethon.tl.functions.messages import ExportChatInviteRequest
 from telethon.tl.functions.payments import (
     GetResaleStarGiftsRequest,
     GetStarGiftsRequest,
@@ -46,7 +44,8 @@ def parse(g, prefix: str) -> dict:
         "owner_id": getattr(oid, "user_id", None),
         "owner_name": getattr(g, "owner_name", None),
         "owner_address": getattr(g, "owner_address", None),
-        "price": None,
+        "ask": None,
+        "floor": None,
     }
     for a in g.attributes:
         kind = type(a).__name__
@@ -58,6 +57,10 @@ def parse(g, prefix: str) -> dict:
             d["backdrop"], d["backdrop_rarity"] = a.name, r
         elif kind == "StarGiftAttributePattern":
             d["symbol"], d["symbol_rarity"] = a.name, r
+    amt = getattr(g, "resell_amount", None)  # цена, если подарок уже выставлен на продажу
+    if isinstance(amt, list):
+        amt = next((x.amount for x in amt if type(x).__name__ == "StarsAmount"), None)
+    d["ask"] = amt if isinstance(amt, int) else None
     return d
 
 
@@ -146,7 +149,7 @@ class Monitor:
     # ---------- main loop ----------
     async def _emit(self, data: dict) -> None:
         try:
-            data["price"] = await self.floor(data.get("gift_id"))
+            data["floor"] = await self.floor(data.get("gift_id"))
             await self.on_gift(data)
         except Exception:
             log.exception("on_gift failed")
@@ -178,10 +181,3 @@ class Monitor:
                 if isinstance(r, Exception):
                     log.error("check error: %r", r)
             await asyncio.sleep(config.POLL_INTERVAL)
-
-    # ---------- deal chat ----------
-    async def create_deal_chat(self, title: str) -> str:
-        res = await self.client(CreateChannelRequest(
-            title=title, about="Сопровождение сделки", megagroup=True))
-        inv = await self.client(ExportChatInviteRequest(peer=res.chats[0]))
-        return inv.link

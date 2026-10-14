@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS users (
     user_id     BIGINT PRIMARY KEY,
     username    TEXT,
     sub_until   TIMESTAMPTZ,
-    enabled     BOOLEAN NOT NULL DEFAULT TRUE,
+    enabled     BOOLEAN NOT NULL DEFAULT FALSE,
     collections TEXT[] NOT NULL DEFAULT '{}',
     models      TEXT[] NOT NULL DEFAULT '{}',
     backdrops   TEXT[] NOT NULL DEFAULT '{}',
@@ -20,6 +20,11 @@ CREATE TABLE IF NOT EXISTS users (
     price_max   BIGINT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE users ADD COLUMN IF NOT EXISTS profit_mode   BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS profit_rarity REAL    NOT NULL DEFAULT 1.0;
+ALTER TABLE users ALTER COLUMN enabled SET DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed BOOLEAN NOT NULL DEFAULT FALSE;
+
 CREATE TABLE IF NOT EXISTS cursors (
     prefix   TEXT PRIMARY KEY,
     last_num INT NOT NULL DEFAULT 0
@@ -31,12 +36,11 @@ CREATE TABLE IF NOT EXISTS gifts (
     data       JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE TABLE IF NOT EXISTS deals (
-    id          SERIAL PRIMARY KEY,
-    slug        TEXT NOT NULL,
-    buyer_id    BIGINT NOT NULL,
-    invite_link TEXT,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE IF NOT EXISTS favorites (
+    user_id    BIGINT NOT NULL,
+    slug       TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, slug)
 );
 """
 
@@ -61,12 +65,16 @@ async def get_user(uid: int) -> dict | None:
     return dict(row) if row else None
 
 
+async def set_enabled(uid: int, enabled: bool) -> None:
+    await pool.execute("UPDATE users SET enabled=$2 WHERE user_id=$1", uid, enabled)
+
+
 async def set_filters(uid: int, f: dict) -> None:
     await pool.execute(
-        "UPDATE users SET enabled=$2, collections=$3, models=$4, backdrops=$5, "
-        "price_min=$6, price_max=$7 WHERE user_id=$1",
-        uid, f["enabled"], f["collections"], f["models"], f["backdrops"],
-        f["price_min"], f["price_max"],
+        "UPDATE users SET collections=$2, models=$3, backdrops=$4, price_min=$5, price_max=$6, "
+        "profit_mode=$7, profit_rarity=$8 WHERE user_id=$1",
+        uid, f["collections"], f["models"], f["backdrops"], f["price_min"], f["price_max"],
+        f["profit_mode"], f["profit_rarity"],
     )
 
 
@@ -86,9 +94,27 @@ def sub_active(u: dict | None) -> bool:
     return bool(u and u["sub_until"] and u["sub_until"] > datetime.now(timezone.utc))
 
 
+def has_access(uid: int, u: dict | None) -> bool:
+    """Админ, человек из белого списка или (в платном режиме) с активной подпиской."""
+    if uid in config.ADMIN_IDS:
+        return True
+    if u and u.get("allowed"):
+        return True
+    return config.PAID_MODE and sub_active(u)
+
+
+async def set_allowed(uid: int, allowed: bool) -> None:
+    await pool.execute(
+        "INSERT INTO users(user_id, allowed) VALUES($1, $2) "
+        "ON CONFLICT (user_id) DO UPDATE SET allowed = EXCLUDED.allowed",
+        uid, allowed,
+    )
+
+
 async def active_users() -> list[dict]:
-    rows = await pool.fetch("SELECT * FROM users WHERE enabled AND sub_until > now()")
-    return [dict(r) for r in rows]
+    rows = await pool.fetch("SELECT * FROM users WHERE enabled")
+    users = [dict(r) for r in rows]
+    return [u for u in users if has_access(u["user_id"], u)]
 
 
 # ---------- monitor ----------
@@ -113,12 +139,23 @@ async def save_gift(data: dict) -> bool:
     return res.endswith("1")
 
 
-# ---------- deals ----------
-async def create_deal(slug: str, buyer_id: int) -> int:
-    return await pool.fetchval(
-        "INSERT INTO deals(slug, buyer_id) VALUES($1,$2) RETURNING id", slug, buyer_id
-    )
+# ---------- favorites ----------
+async def toggle_fav(uid: int, slug: str) -> bool:
+    """True - добавлено, False - убрано."""
+    res = await pool.execute("DELETE FROM favorites WHERE user_id=$1 AND slug=$2", uid, slug)
+    if res.endswith("1"):
+        return False
+    await pool.execute(
+        "INSERT INTO favorites(user_id, slug) VALUES($1,$2) ON CONFLICT DO NOTHING", uid, slug)
+    return True
 
 
-async def set_deal_link(deal_id: int, link: str) -> None:
-    await pool.execute("UPDATE deals SET invite_link=$2 WHERE id=$1", deal_id, link)
+async def remove_fav(uid: int, slug: str) -> None:
+    await pool.execute("DELETE FROM favorites WHERE user_id=$1 AND slug=$2", uid, slug)
+
+
+async def list_favs(uid: int) -> list[dict]:
+    rows = await pool.fetch(
+        "SELECT g.data FROM favorites f JOIN gifts g ON g.slug = f.slug "
+        "WHERE f.user_id=$1 ORDER BY f.created_at DESC LIMIT 100", uid)
+    return [json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in rows]

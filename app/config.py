@@ -18,8 +18,7 @@ COLLECTIONS = [c.strip() for c in os.getenv("COLLECTIONS", "").split(",") if c.s
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "3"))
 CONCURRENCY = int(os.getenv("CONCURRENCY", "8"))
 
-# дни -> цена в Telegram Stars
-PLANS = {
-    7: int(os.getenv("PRICE_7D", "250")),
-    30: int(os.getenv("PRICE_30D", "800")),
-}
+# PAID_MODE=1 включает платный тариф; по умолчанию бот приватный (доступ по списку)
+PAID_MODE = os.getenv("PAID_MODE", "0") == "1"
+# дни -> цена в Telegram Stars (один тариф)
+PLANS = {7: int(os.getenv("PRICE_7D", "2000"))}

@@ -43,6 +43,13 @@ def _int(v) -> int | None:
         return None
 
 
+def _rarity(v) -> float:
+    try:
+        return min(max(float(v), 0.1), 100.0)
+    except (TypeError, ValueError):
+        return 1.0
+
+
 def make_app(bot: Bot) -> web.Application:
     app = web.Application()
 
@@ -51,6 +58,8 @@ def make_app(bot: Bot) -> web.Application:
         if not u:
             raise web.HTTPUnauthorized()
         await db.upsert_user(u["id"], u.get("username"))
+        if not config.PAID_MODE and not db.has_access(u["id"], await db.get_user(u["id"])):
+            raise web.HTTPForbidden()
         return u
 
     async def index(_):
@@ -63,30 +72,55 @@ def make_app(bot: Bot) -> web.Application:
         u = await auth(request)
         row = await db.get_user(u["id"])
         return web.json_response({
-            "active": db.sub_active(row),
+            "active": db.has_access(u["id"], row),
+            "paid_mode": config.PAID_MODE,
             "sub_until": row["sub_until"].isoformat() if row["sub_until"] else None,
             "enabled": row["enabled"],
             "collections": row["collections"], "models": row["models"],
             "backdrops": row["backdrops"],
             "price_min": row["price_min"], "price_max": row["price_max"],
+            "profit_mode": row["profit_mode"], "profit_rarity": row["profit_rarity"],
             "plans": config.PLANS,
         })
+
+    async def toggle(request):
+        u = await auth(request)
+        row = await db.get_user(u["id"])
+        want = bool((await request.json()).get("enabled"))
+        if want and not db.has_access(u["id"], row):
+            raise web.HTTPPaymentRequired()
+        await db.set_enabled(u["id"], want)
+        return web.json_response({"enabled": want})
 
     async def save(request):
         u = await auth(request)
         b = await request.json()
         await db.set_filters(u["id"], {
-            "enabled": bool(b.get("enabled", True)),
             "collections": _list(b.get("collections")),
             "models": _list(b.get("models")),
             "backdrops": _list(b.get("backdrops")),
             "price_min": _int(b.get("price_min")),
             "price_max": _int(b.get("price_max")),
+            "profit_mode": bool(b.get("profit_mode")),
+            "profit_rarity": _rarity(b.get("profit_rarity")),
         })
+        return web.json_response({"ok": True})
+
+    async def favorites(request):
+        u = await auth(request)
+        items = await db.list_favs(u["id"])
+        keys = ("slug", "collection", "num", "model", "backdrop", "symbol")
+        return web.json_response({"items": [{k: i.get(k) for k in keys} for i in items]})
+
+    async def fav_remove(request):
+        u = await auth(request)
+        await db.remove_fav(u["id"], str((await request.json()).get("slug", "")))
         return web.json_response({"ok": True})
 
     async def invoice(request):
         await auth(request)
+        if not config.PAID_MODE:
+            raise web.HTTPNotFound()
         days = _int((await request.json()).get("days"))
         if days not in config.PLANS:
             raise web.HTTPBadRequest()
@@ -95,7 +129,9 @@ def make_app(bot: Bot) -> web.Application:
 
     app.add_routes([
         web.get("/", index), web.get("/health", health),
-        web.get("/api/me", me), web.post("/api/filters", save),
+        web.get("/api/me", me), web.post("/api/toggle", toggle),
+        web.post("/api/filters", save),
+        web.get("/api/favorites", favorites), web.post("/api/favorites/remove", fav_remove),
         web.post("/api/invoice", invoice),
     ])
     return app

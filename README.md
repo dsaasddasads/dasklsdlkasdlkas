@@ -16,10 +16,10 @@
    (`DATABASE_URL` = `${{Postgres.DATABASE_URL}}`).
 8. Settings -> Networking -> Generate Domain, вставь домен в `WEBAPP_URL`, Redeploy.
 9. @BotFather -> `/mybots` -> твой бот -> Bot Settings -> Menu Button -> укажи `WEBAPP_URL`.
-10. Напиши боту `/start`, выдай себе доступ: `/grant <твой_id> 30`.
+10. Напиши боту `/start` (админы из `ADMIN_IDS` имеют доступ сразу). Друзьям: они жмут `/start`, ты пишешь `/allow <их_id>`.
 
 ## Команды
-`/start` `/help` `/sub` `/status`, админ: `/grant <user_id> <дней>`
+`/start` (список функций), `/status`, админ: `/allow <user_id>`, `/deny <user_id>`, `/grant <user_id> <дней>` (только при `PAID_MODE=1`)
 
 ## Важно
 - Схема TL по подаркам меняется: если после обновления Telethon что-то упало,
