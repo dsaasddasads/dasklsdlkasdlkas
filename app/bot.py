@@ -1,13 +1,13 @@
 import asyncio
 import html
 import logging
-from urllib.parse import quote
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
-    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice,
-    Message, PreCheckoutQuery,
+    BotCommand, BotCommandScopeChat, BotCommandScopeDefault, CallbackQuery,
+    InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, LabeledPrice, Message,
+    PreCheckoutQuery, ReplyKeyboardMarkup, ReplyKeyboardRemove, WebAppInfo,
 )
 from telethon import TelegramClient
 
@@ -21,14 +21,13 @@ WELCOME = (
     "Приватный инструмент для выкупа только что улучшенных Telegram-подарков.\n\n"
     "<b>Что умеет:</b>\n"
     "— мгновенные уведомления о каждом улучшении\n"
-    "— уведомления только по подаркам, на которые можно отправить оффер\n"
-    "— показываем минимальный оффер, кнопка «Написать владельцу» открывает чат с готовым текстом\n"
-    "— оценка рынка: Telegram и Portals — флор коллекции, модели, фона и пары\n"
+    "— точный поиск владельца: пишешь ему первым\n"
+    "— оценка рынка: флор коллекции, модели, фона и пары модель+фон\n"
     "— гибкие фильтры: коллекции, модели, фоны, цены и исключения\n"
     "— режим выгодных предложений: редкость, премия к рынку, красивые номера\n"
     "— избранное: сохраняй подарки одной кнопкой\n"
     "— старт и стоп работы в любой момент\n\n"
-    "Управление и подписка — в приложении (кнопка меню рядом с полем ввода)."
+    "Управление — кнопками меню внизу или в приложении."
 )
 
 
@@ -48,25 +47,110 @@ def invoice_args(days: int) -> dict:
 async def start(m: Message):
     await db.upsert_user(m.from_user.id, m.from_user.username)
     u = await db.get_user(m.from_user.id)
-    if not config.PAID_MODE and not db.has_access(m.from_user.id, u):
+    has = db.has_access(m.from_user.id, u)
+    if not config.PAID_MODE and not has:
         return await m.answer("🔒 Приватный бот. Доступ только по приглашению.\n"
-                              f"Твой ID: <code>{m.from_user.id}</code> — отправь его владельцу.")
-    await m.answer(WELCOME)
+                              f"Твой ID: <code>{m.from_user.id}</code> — отправь его владельцу.",
+                              reply_markup=ReplyKeyboardRemove())
+    await m.answer(WELCOME, reply_markup=menu_kb(u, has))
 
 
-@router.message(Command("status"))
-async def status(m: Message):
-    u = await db.get_user(m.from_user.id)
-    if db.has_access(m.from_user.id, u):
+# ---------- меню в чате ----------
+TXT_START = "▶ Начать работу"
+TXT_STOP = "⏹ Завершить работу"
+TXT_FAVS = "⭐ Избранное"
+TXT_STATUS = "📊 Статус"
+TXT_PROFIT = "🔥 Выгода"
+
+
+def menu_kb(u: dict | None, access: bool = True) -> ReplyKeyboardMarkup:
+    """Постоянное меню внизу чата; подписи кнопок отражают текущее состояние."""
+    app = ([KeyboardButton(text="⚙️ Приложение", web_app=WebAppInfo(url=config.WEBAPP_URL))]
+           if config.WEBAPP_URL else [])
+    if not access:
+        rows = [app] if app else []
+    else:
+        on = bool(u and u["enabled"])
+        profit = bool(u and u["profit_mode"])
+        rows = [
+            [KeyboardButton(text=TXT_STOP if on else TXT_START)],
+            [KeyboardButton(text=f"{TXT_PROFIT}: {'вкл' if profit else 'выкл'}"),
+             KeyboardButton(text=TXT_FAVS)],
+            [KeyboardButton(text=TXT_STATUS)] + app,
+        ]
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
+
+
+async def status_text(uid: int) -> str:
+    u = await db.get_user(uid)
+    if db.has_access(uid, u):
         state = "работает" if u and u["enabled"] else "остановлен"
+        mode = "включён" if u and u["profit_mode"] else "выключен"
         until = ""
         if config.PAID_MODE and u and db.sub_active(u):
             until = f" Подписка до {u['sub_until']:%d.%m.%Y %H:%M} UTC."
-        await m.answer(f"✅ Доступ открыт. Бот {state}.{until}")
-    elif config.PAID_MODE:
-        await m.answer("Подписки нет. Оформи её в приложении.")
-    else:
-        await m.answer("🔒 Приватный бот. Доступа нет.")
+        return f"✅ Доступ открыт. Бот {state}. Режим выгодных: {mode}.{until}"
+    if config.PAID_MODE:
+        return "Подписки нет. Оформи её в приложении."
+    return "🔒 Приватный бот. Доступа нет."
+
+
+async def _gate(m: Message) -> tuple[dict | None, bool]:
+    await db.upsert_user(m.from_user.id, m.from_user.username)
+    u = await db.get_user(m.from_user.id)
+    ok = db.has_access(m.from_user.id, u)
+    if not ok:
+        await m.answer("Нужна подписка — оформи её в приложении." if config.PAID_MODE else "🔒 Нет доступа.")
+    return u, ok
+
+
+@router.message(Command("status"))
+@router.message(F.text == TXT_STATUS)
+async def status(m: Message):
+    await m.answer(await status_text(m.from_user.id))
+
+
+@router.message(F.text.in_({TXT_START, TXT_STOP}))
+async def work_btn(m: Message):
+    u, ok = await _gate(m)
+    if not ok:
+        return
+    want = m.text == TXT_START  # кнопка не переключает, а задаёт состояние - без путаницы при устаревшей подписи
+    await db.set_enabled(m.from_user.id, want)
+    u["enabled"] = want
+    await m.answer("▶ Работа начата — уведомления включены." if want
+                   else "⏹ Работа завершена — уведомления выключены.", reply_markup=menu_kb(u))
+
+
+@router.message(F.text.startswith(TXT_PROFIT))
+async def profit_btn(m: Message):
+    u, ok = await _gate(m)
+    if not ok:
+        return
+    want = m.text.rstrip().endswith("выкл")  # на кнопке было "выкл" - значит включаем
+    await db.set_profit(m.from_user.id, want)
+    u["profit_mode"] = want
+    await m.answer("🔥 Режим выгодных предложений включён. Порог и условия — в приложении." if want
+                   else "Режим выгодных предложений выключен.", reply_markup=menu_kb(u))
+
+
+@router.message(F.text == TXT_FAVS)
+async def favs_btn(m: Message):
+    _, ok = await _gate(m)
+    if not ok:
+        return
+    items = await db.list_favs(m.from_user.id)
+    if not items:
+        return await m.answer("Избранное пусто. Жми «⭐ В избранное» под уведомлением.")
+    shown = items[:10]
+    lines = [f"{i}. {html.escape(g['collection'])} #{g['num']} — "
+             f"{html.escape(' · '.join(x for x in (g.get('model'), g.get('backdrop')) if x))}"
+             for i, g in enumerate(shown, 1)]
+    more = f"\n\nПоказаны последние 10 из {len(items)}. Весь список — в приложении." if len(items) > 10 else ""
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🎁 {g['collection']} #{g['num']}", url=f"https://t.me/nft/{g['slug']}")]
+        for g in shown])
+    await m.answer("⭐ <b>Избранное</b>\n\n" + "\n".join(lines) + more, reply_markup=kb)
 
 
 @router.message(Command("grant"))
@@ -106,6 +190,51 @@ async def deny(m: Message, command: CommandObject):
     await m.answer(f"⛔ Доступ закрыт: {uid}")
 
 
+# ---------- admin: пользователи и состояние ----------
+@router.message(Command("users"))
+async def users_cmd(m: Message):
+    if m.from_user.id not in config.ADMIN_IDS:
+        return
+    rows = await db.list_users()
+    seen = {r["user_id"] for r in rows}
+    lines, working = [], 0
+    for r in rows:
+        uid = r["user_id"]
+        if uid in config.ADMIN_IDS:
+            acc = "админ"
+        elif r["allowed"]:
+            acc = "доступ"
+        elif config.PAID_MODE and db.sub_active(r):
+            acc = f"подписка до {r['sub_until']:%d.%m}"
+        else:
+            acc = "нет доступа"
+        has = acc != "нет доступа"
+        on = has and r["enabled"]
+        working += 1 if on else 0
+        icon = "🟢" if on else ("⚪" if has else "🔒")
+        name = f"@{html.escape(r['username'])}" if r["username"] else "—"
+        lines.append(f"{icon} {name} · <code>{uid}</code> · {acc}")
+    for uid in sorted(config.ADMIN_IDS - seen):
+        lines.append(f"⚪ — · <code>{uid}</code> · админ (не запускал бота)")
+    if not lines:
+        return await m.answer("Пользователей пока нет.")
+    head = f"👥 Пользователей: {len(lines)} · работают: {working}\n🟢 работает · ⚪ остановлен · 🔒 нет доступа\n\n"
+    chunk = head
+    for line in lines:
+        if len(chunk) + len(line) > 3800:
+            await m.answer(chunk)
+            chunk = ""
+        chunk += line + "\n"
+    await m.answer(chunk)
+
+
+@router.message(Command("health"))
+async def health_cmd(m: Message, monitor):
+    if m.from_user.id not in config.ADMIN_IDS:
+        return
+    await m.answer(monitor.health())
+
+
 # ---------- payments (Telegram Stars, только PAID_MODE=1) ----------
 @router.pre_checkout_query()
 async def pre_checkout(q: PreCheckoutQuery):
@@ -127,6 +256,20 @@ async def paid(m: Message):
 async def fav(c: CallbackQuery):
     added = await db.toggle_fav(c.from_user.id, c.data[4:])
     await c.answer("⭐ Добавлено в избранное" if added else "Убрано из избранного")
+
+
+@router.callback_query(F.data.startswith("hide:"))
+async def hide(c: CallbackQuery):
+    _, kind, slug = c.data.split(":", 2)
+    g = await db.get_gift(slug)
+    if not g:
+        return await c.answer("Подарок не найден", show_alert=True)
+    col, val = (("exclude_collections", g.get("collection")) if kind == "c"
+                else ("exclude_models", g.get("model")))
+    if not val:
+        return await c.answer("Нечего скрывать", show_alert=True)
+    await db.add_exclude(c.from_user.id, col, val)
+    await c.answer(f"🚫 Больше не покажу: {val}")
 
 
 # ---------- matching ----------
@@ -187,44 +330,6 @@ def base_match(u: dict, d: dict) -> bool:
     return True
 
 
-def ton_to_stars(d: dict, ton: float | None) -> int | None:
-    k = d.get("ton_per_star")
-    return round(ton / k) if ton and k else None
-
-
-def gram(d: dict, stars: float | None) -> float | None:
-    """⭐ -> GRAM (бывший TON) по курсу из листингов Telegram."""
-    k = d.get("ton_per_star")
-    return stars * k if stars and k else None
-
-
-def fmt(x: float) -> str:
-    t = f"{x:.0f}" if x >= 100 else f"{x:.1f}" if x >= 10 else f"{x:.2f}"
-    return t.rstrip("0").rstrip(".") if "." in t else t
-
-
-def price_str(d: dict, stars: float | None) -> str:
-    """'627 ⭐ (≈6.6 GRAM)'."""
-    g = gram(d, stars)
-    return f"{stars:.0f} ⭐" + (f" (≈{fmt(g)} GRAM)" if g else "")
-
-
-def portals_ref(d: dict) -> float | None:
-    """Самая точная цена Portals (GRAM): пара модель+фон, иначе модель, иначе фон."""
-    for k in ("portals_combo_floor", "portals_model_floor", "portals_backdrop_floor"):
-        if d.get(k):
-            return d[k]
-    return None
-
-
-def portals_discount(d: dict) -> float | None:
-    """На сколько % цена в листинге Telegram ниже цены Portals (нужен листинг и курс GRAM/⭐)."""
-    ask, ref = d.get("ask"), ton_to_stars(d, portals_ref(d))
-    if ask is None or not ref:
-        return None
-    return (1 - ask / ref) * 100
-
-
 def profit_check(u: dict, d: dict) -> tuple[bool, list[str]]:
     """Режим выгодных предложений. Возвращает (проходит, причины)."""
     if not u["profit_mode"]:
@@ -235,12 +340,9 @@ def profit_check(u: dict, d: dict) -> tuple[bool, list[str]]:
         reasons.append(f"редкий признак ({r / 10:g}%)")
     est, floor = est_value(d), d.get("floor")
     if est and floor and est >= floor * config.PREMIUM_X:
-        reasons.append(f"по рынку от {price_str(d, est)} — в {est / floor:.1f}× выше флора коллекции")
+        reasons.append(f"по рынку от {est} ⭐ — в {est / floor:.1f}× выше флора коллекции")
     if nice_number(d["num"]):
         reasons.append(f"красивый номер #{d['num']}")
-    cheap = portals_discount(d)
-    if cheap is not None and cheap >= config.PORTALS_DISCOUNT:
-        reasons.append(f"в листинге на {cheap:.0f}% дешевле, чем на Portals")
     if not reasons:
         return False, []
     ask = d.get("ask")
@@ -260,33 +362,30 @@ def _pct(r: int | None) -> str:
     return f" ({r / 10:g}%)" if r is not None else ""
 
 
-def _row(label: str, d: dict, tg_stars, tg_n, pt_gram) -> str | None:
-    """Строка сравнения маркетов: Telegram (⭐ -> GRAM) и Portals (GRAM)."""
-    parts = []
-    if tg_stars:
-        g = gram(d, tg_stars)
-        t = fmt(g) if g else f"{tg_stars} ⭐"
-        parts.append(f"Telegram {t}" + (f" ({tg_n} шт.)" if tg_n else ""))
-    if pt_gram:
-        parts.append(f"Portals {fmt(pt_gram)}")
-    return f"{label}: " + " · ".join(parts) if parts else None
+def _mk(label: str, floor, n) -> str | None:
+    if not floor:
+        return None
+    return f"{label} от {floor} ⭐" + (f" ({n} шт.)" if n else "")
 
 
 def render(d: dict, reasons: list[str] | None = None) -> str:
     e = html.escape
     if d.get("ask") is not None:
-        price = f"{price_str(d, d['ask'])}, цена в листинге"
+        price = f"{d['ask']} ⭐ (цена в листинге)"
     elif d.get("floor") is not None:
-        price = f"~{price_str(d, d['floor'])}, флор коллекции"
+        price = f"~{d['floor']} ⭐ (флор коллекции)"
     else:
         price = "нет данных"
-    if d.get("owner_name"):
+    if d.get("owner_label"):
+        owner = e(d["owner_label"])
+    elif d.get("owner_name"):
         owner = e(d["owner_name"])
     elif d.get("owner_address"):
         owner = f"кошелёк <code>{e(d['owner_address'])}</code>"
     else:
         owner = "скрыт"
     total = f"/{d['total']}" if d.get("total") else ""
+    offer = f"от {d['offer_min']} ⭐" if d.get("offer_min") else "—"
     text = (
         f"🎁 <b>{e(d['collection'])} #{d['num']}</b>\n\n"
         f"Модель: <b>{e(d['model'] or '—')}</b>{_pct(d['model_rarity'])}\n"
@@ -294,60 +393,58 @@ def render(d: dict, reasons: list[str] | None = None) -> str:
         f"Узор: <b>{e(d['symbol'] or '—')}</b>{_pct(d['symbol_rarity'])}\n"
         f"Выпуск: {d['num']}{total}\n"
         f"Цена: {price}\n"
+        f"Мин. оффер: {offer}\n"
         f"Владелец: {owner}"
     )
-    if d.get("offer_min") is not None:
-        text += f"\nМин. оффер: {price_str(d, d['offer_min'])}"
-    rows = [x for x in (
-        _row("Коллекция", d, d.get("floor"), None, d.get("portals_floor")),
-        _row("Модель", d, d.get("model_floor"), d.get("model_listed"), d.get("portals_model_floor")),
-        _row("Фон", d, d.get("backdrop_floor"), d.get("backdrop_listed"), d.get("portals_backdrop_floor")),
-        _row("Модель+фон", d, d.get("combo_floor"), d.get("combo_listed"), d.get("portals_combo_floor")),
+    market = [x for x in (
+        _mk("Коллекция", d.get("floor"), None),
+        _mk("Модель", d.get("model_floor"), d.get("model_listed")),
+        _mk("Фон", d.get("backdrop_floor"), d.get("backdrop_listed")),
+        _mk("Модель+фон", d.get("combo_floor"), d.get("combo_listed")),
     ) if x]
-    if rows:
-        unit = "GRAM" if d.get("ton_per_star") else "Telegram в ⭐, Portals в GRAM"
-        text += f"\n\n📊 <b>Цены маркетов ({unit})</b>\n" + "\n".join(rows)
+    if market:
+        text += "\n\n📊 <b>Рынок</b>\n" + "\n".join(market)
+    if d.get("est_usd"):
+        text += f"\nОценка Telegram: ~${d['est_usd']:,.0f}"
     if reasons:
         text += "\n\n🔥 <b>Почему выгодно</b>\n" + "\n".join(f"— {e(r)}" for r in reasons)
     return text
 
 
-def message_text(d: dict) -> str:
-    """Текст, который подставится в чат с владельцем (шаблон MSG_TEMPLATE)."""
-    t = config.MSG_TEMPLATE
-    for k, v in (("{collection}", d["collection"]), ("{num}", str(d["num"])),
-                 ("{link}", f"https://t.me/nft/{d['slug']}")):
-        t = t.replace(k, v)
-    return t
-
-
-def contact_url(d: dict) -> str | None:
-    """Ссылка на чат с владельцем и готовым текстом. None - если написать нельзя."""
-    name = d.get("owner_username")
-    if name and (d.get("owner_reachable") or not config.ONLY_REACHABLE):
-        return f"https://t.me/{name}?text={quote(message_text(d), safe='')}"
-    if not config.ONLY_REACHABLE and d.get("owner_id"):
-        return f"tg://user?id={d['owner_id']}"  # запасной вариант: работает не у всех
-    return None
+async def owner_info(client: TelegramClient, d: dict) -> tuple[str | None, str | None]:
+    """(ссылка для сообщения владельцу, подпись для уведомления)."""
+    uid = d.get("owner_id")
+    if not uid:
+        return None, None
+    url, label = f"tg://user?id={uid}", f"ID {uid}"
+    try:
+        ent = await client.get_entity(uid)
+        name = " ".join(x for x in (getattr(ent, "first_name", None), getattr(ent, "last_name", None)) if x)
+        uname = getattr(ent, "username", None)
+        if uname:
+            url = f"https://t.me/{uname}"
+            label = f"{name} (@{uname})" if name else f"@{uname}"
+        elif name:
+            label = name
+    except Exception:
+        pass
+    return url, label
 
 
 async def broadcast(bot: Bot, client: TelegramClient, monitor, d: dict) -> None:
     base = [u for u in await db.active_users() if base_match(u, d)]
     if not base:
         return
-    if config.ONLY_OFFERABLE and monitor.offer_supported and d.get("offer_min") is None:
-        log.info("%s пропущен: оффер на этот подарок недоступен", d["slug"])
-        return
-    await monitor.resolve_owner(d)  # профиль владельца: только если подарок кому-то подходит
-    url = contact_url(d)
-    if config.ONLY_REACHABLE and not url:
-        log.info("%s пропущен: %s", d["slug"], d.get("owner_note") or "написать владельцу нельзя")
-        return
-    await monitor.valuate(d)  # запросы к маркетам только если подарок вообще кому-то подходит
+    await monitor.valuate(d)  # запросы к маркету только если подарок вообще кому-то подходит
     rows = [[InlineKeyboardButton(text="🎁 Открыть подарок", url=f"https://t.me/nft/{d['slug']}")]]
+    url, d["owner_label"] = await owner_info(client, d)
     if url:
         rows.append([InlineKeyboardButton(text="👤 Написать владельцу", url=url)])
     rows.append([InlineKeyboardButton(text="⭐ В избранное", callback_data=f"fav:{d['slug']}")])
+    rows.append([
+        InlineKeyboardButton(text="🚫 Коллекция", callback_data=f"hide:c:{d['slug']}"),
+        InlineKeyboardButton(text="🚫 Модель", callback_data=f"hide:m:{d['slug']}"),
+    ])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
     sent = 0
     for u in base:
@@ -361,3 +458,28 @@ async def broadcast(bot: Bot, client: TelegramClient, monitor, d: dict) -> None:
             log.debug("send to %s failed: %s", u["user_id"], e)
         await asyncio.sleep(0.04)
     log.info("%s -> %d users", d["slug"], sent)
+
+
+async def setup_commands(bot: Bot) -> None:
+    """Меню команд по кнопке «/»: обычным людям - короткое, админам - расширенное."""
+    user_cmds = [
+        BotCommand(command="start", description="Меню и список функций"),
+        BotCommand(command="status", description="Статус работы"),
+    ]
+    admin_cmds = user_cmds + [
+        BotCommand(command="users", description="Список людей"),
+        BotCommand(command="health", description="Состояние мониторинга"),
+        BotCommand(command="allow", description="Выдать доступ: /allow <id>"),
+        BotCommand(command="deny", description="Закрыть доступ: /deny <id>"),
+    ]
+    if config.PAID_MODE:
+        admin_cmds.append(BotCommand(command="grant", description="Продлить подписку: /grant <id> <дней>"))
+    try:
+        await bot.set_my_commands(user_cmds, scope=BotCommandScopeDefault())
+    except Exception as e:
+        log.warning("set_my_commands failed: %s", e)
+    for admin in config.ADMIN_IDS:
+        try:
+            await bot.set_my_commands(admin_cmds, scope=BotCommandScopeChat(chat_id=admin))
+        except Exception as e:  # админ ещё не писал боту - команды выставятся при следующем запуске
+            log.debug("admin commands for %s failed: %s", admin, e)

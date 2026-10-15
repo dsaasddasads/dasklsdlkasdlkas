@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS gifts (
     data       JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    ts  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS favorites (
     user_id    BIGINT NOT NULL,
     slug       TEXT NOT NULL,
@@ -165,3 +169,40 @@ async def list_favs(uid: int) -> list[dict]:
         "SELECT g.data FROM favorites f JOIN gifts g ON g.slug = f.slug "
         "WHERE f.user_id=$1 ORDER BY f.created_at DESC LIMIT 100", uid)
     return [json.loads(r["data"]) if isinstance(r["data"], str) else r["data"] for r in rows]
+
+
+# ---------- admin ----------
+async def list_users() -> list[dict]:
+    rows = await pool.fetch(
+        "SELECT user_id, username, enabled, allowed, sub_until FROM users ORDER BY created_at")
+    return [dict(r) for r in rows]
+
+
+async def should_alert(kind: str, cooldown_s: float) -> bool:
+    """True, если алерт такого типа не отправлялся последние cooldown_s секунд (и фиксирует отправку)."""
+    v = await pool.fetchval(
+        "INSERT INTO meta(key, ts) VALUES($1, now()) "
+        "ON CONFLICT (key) DO UPDATE SET ts = now() "
+        "WHERE meta.ts < now() - make_interval(secs => $2) RETURNING 1",
+        f"alert:{kind}", float(cooldown_s))
+    return v is not None
+
+
+# ---------- меню в чате ----------
+async def set_profit(uid: int, on: bool) -> None:
+    await pool.execute("UPDATE users SET profit_mode=$2 WHERE user_id=$1", uid, on)
+
+
+async def get_gift(slug: str) -> dict | None:
+    v = await pool.fetchval("SELECT data FROM gifts WHERE slug=$1", slug)
+    if v is None:
+        return None
+    return json.loads(v) if isinstance(v, str) else v
+
+
+async def add_exclude(uid: int, col: str, value: str) -> None:
+    if col not in ("exclude_collections", "exclude_models", "exclude_backdrops"):
+        raise ValueError(col)
+    await pool.execute(
+        f"UPDATE users SET {col} = array_append({col}, $2) "
+        f"WHERE user_id=$1 AND NOT ($2 = ANY({col}))", uid, value)
