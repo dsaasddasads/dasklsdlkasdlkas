@@ -5,8 +5,9 @@ import logging
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
-    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice,
-    Message, PreCheckoutQuery,
+    BotCommand, BotCommandScopeChat, BotCommandScopeDefault, CallbackQuery,
+    InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, LabeledPrice, Message,
+    PreCheckoutQuery, ReplyKeyboardMarkup, ReplyKeyboardRemove, WebAppInfo,
 )
 from telethon import TelegramClient
 
@@ -26,7 +27,7 @@ WELCOME = (
     "— режим выгодных предложений: редкость, премия к рынку, красивые номера\n"
     "— избранное: сохраняй подарки одной кнопкой\n"
     "— старт и стоп работы в любой момент\n\n"
-    "Управление и подписка — в приложении (кнопка меню рядом с полем ввода)."
+    "Управление — кнопками меню внизу или в приложении."
 )
 
 
@@ -46,25 +47,110 @@ def invoice_args(days: int) -> dict:
 async def start(m: Message):
     await db.upsert_user(m.from_user.id, m.from_user.username)
     u = await db.get_user(m.from_user.id)
-    if not config.PAID_MODE and not db.has_access(m.from_user.id, u):
+    has = db.has_access(m.from_user.id, u)
+    if not config.PAID_MODE and not has:
         return await m.answer("🔒 Приватный бот. Доступ только по приглашению.\n"
-                              f"Твой ID: <code>{m.from_user.id}</code> — отправь его владельцу.")
-    await m.answer(WELCOME)
+                              f"Твой ID: <code>{m.from_user.id}</code> — отправь его владельцу.",
+                              reply_markup=ReplyKeyboardRemove())
+    await m.answer(WELCOME, reply_markup=menu_kb(u, has))
 
 
-@router.message(Command("status"))
-async def status(m: Message):
-    u = await db.get_user(m.from_user.id)
-    if db.has_access(m.from_user.id, u):
+# ---------- меню в чате ----------
+TXT_START = "▶ Начать работу"
+TXT_STOP = "⏹ Завершить работу"
+TXT_FAVS = "⭐ Избранное"
+TXT_STATUS = "📊 Статус"
+TXT_PROFIT = "🔥 Выгода"
+
+
+def menu_kb(u: dict | None, access: bool = True) -> ReplyKeyboardMarkup:
+    """Постоянное меню внизу чата; подписи кнопок отражают текущее состояние."""
+    app = ([KeyboardButton(text="⚙️ Приложение", web_app=WebAppInfo(url=config.WEBAPP_URL))]
+           if config.WEBAPP_URL else [])
+    if not access:
+        rows = [app] if app else []
+    else:
+        on = bool(u and u["enabled"])
+        profit = bool(u and u["profit_mode"])
+        rows = [
+            [KeyboardButton(text=TXT_STOP if on else TXT_START)],
+            [KeyboardButton(text=f"{TXT_PROFIT}: {'вкл' if profit else 'выкл'}"),
+             KeyboardButton(text=TXT_FAVS)],
+            [KeyboardButton(text=TXT_STATUS)] + app,
+        ]
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
+
+
+async def status_text(uid: int) -> str:
+    u = await db.get_user(uid)
+    if db.has_access(uid, u):
         state = "работает" if u and u["enabled"] else "остановлен"
+        mode = "включён" if u and u["profit_mode"] else "выключен"
         until = ""
         if config.PAID_MODE and u and db.sub_active(u):
             until = f" Подписка до {u['sub_until']:%d.%m.%Y %H:%M} UTC."
-        await m.answer(f"✅ Доступ открыт. Бот {state}.{until}")
-    elif config.PAID_MODE:
-        await m.answer("Подписки нет. Оформи её в приложении.")
-    else:
-        await m.answer("🔒 Приватный бот. Доступа нет.")
+        return f"✅ Доступ открыт. Бот {state}. Режим выгодных: {mode}.{until}"
+    if config.PAID_MODE:
+        return "Подписки нет. Оформи её в приложении."
+    return "🔒 Приватный бот. Доступа нет."
+
+
+async def _gate(m: Message) -> tuple[dict | None, bool]:
+    await db.upsert_user(m.from_user.id, m.from_user.username)
+    u = await db.get_user(m.from_user.id)
+    ok = db.has_access(m.from_user.id, u)
+    if not ok:
+        await m.answer("Нужна подписка — оформи её в приложении." if config.PAID_MODE else "🔒 Нет доступа.")
+    return u, ok
+
+
+@router.message(Command("status"))
+@router.message(F.text == TXT_STATUS)
+async def status(m: Message):
+    await m.answer(await status_text(m.from_user.id))
+
+
+@router.message(F.text.in_({TXT_START, TXT_STOP}))
+async def work_btn(m: Message):
+    u, ok = await _gate(m)
+    if not ok:
+        return
+    want = m.text == TXT_START  # кнопка не переключает, а задаёт состояние - без путаницы при устаревшей подписи
+    await db.set_enabled(m.from_user.id, want)
+    u["enabled"] = want
+    await m.answer("▶ Работа начата — уведомления включены." if want
+                   else "⏹ Работа завершена — уведомления выключены.", reply_markup=menu_kb(u))
+
+
+@router.message(F.text.startswith(TXT_PROFIT))
+async def profit_btn(m: Message):
+    u, ok = await _gate(m)
+    if not ok:
+        return
+    want = m.text.rstrip().endswith("выкл")  # на кнопке было "выкл" - значит включаем
+    await db.set_profit(m.from_user.id, want)
+    u["profit_mode"] = want
+    await m.answer("🔥 Режим выгодных предложений включён. Порог и условия — в приложении." if want
+                   else "Режим выгодных предложений выключен.", reply_markup=menu_kb(u))
+
+
+@router.message(F.text == TXT_FAVS)
+async def favs_btn(m: Message):
+    _, ok = await _gate(m)
+    if not ok:
+        return
+    items = await db.list_favs(m.from_user.id)
+    if not items:
+        return await m.answer("Избранное пусто. Жми «⭐ В избранное» под уведомлением.")
+    shown = items[:10]
+    lines = [f"{i}. {html.escape(g['collection'])} #{g['num']} — "
+             f"{html.escape(' · '.join(x for x in (g.get('model'), g.get('backdrop')) if x))}"
+             for i, g in enumerate(shown, 1)]
+    more = f"\n\nПоказаны последние 10 из {len(items)}. Весь список — в приложении." if len(items) > 10 else ""
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🎁 {g['collection']} #{g['num']}", url=f"https://t.me/nft/{g['slug']}")]
+        for g in shown])
+    await m.answer("⭐ <b>Избранное</b>\n\n" + "\n".join(lines) + more, reply_markup=kb)
 
 
 @router.message(Command("grant"))
@@ -170,6 +256,20 @@ async def paid(m: Message):
 async def fav(c: CallbackQuery):
     added = await db.toggle_fav(c.from_user.id, c.data[4:])
     await c.answer("⭐ Добавлено в избранное" if added else "Убрано из избранного")
+
+
+@router.callback_query(F.data.startswith("hide:"))
+async def hide(c: CallbackQuery):
+    _, kind, slug = c.data.split(":", 2)
+    g = await db.get_gift(slug)
+    if not g:
+        return await c.answer("Подарок не найден", show_alert=True)
+    col, val = (("exclude_collections", g.get("collection")) if kind == "c"
+                else ("exclude_models", g.get("model")))
+    if not val:
+        return await c.answer("Нечего скрывать", show_alert=True)
+    await db.add_exclude(c.from_user.id, col, val)
+    await c.answer(f"🚫 Больше не покажу: {val}")
 
 
 # ---------- matching ----------
@@ -330,6 +430,10 @@ async def broadcast(bot: Bot, client: TelegramClient, monitor, d: dict) -> None:
     if url:
         rows.append([InlineKeyboardButton(text="👤 Написать владельцу", url=url)])
     rows.append([InlineKeyboardButton(text="⭐ В избранное", callback_data=f"fav:{d['slug']}")])
+    rows.append([
+        InlineKeyboardButton(text="🚫 Коллекция", callback_data=f"hide:c:{d['slug']}"),
+        InlineKeyboardButton(text="🚫 Модель", callback_data=f"hide:m:{d['slug']}"),
+    ])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
     sent = 0
     for u in base:
@@ -343,3 +447,28 @@ async def broadcast(bot: Bot, client: TelegramClient, monitor, d: dict) -> None:
             log.debug("send to %s failed: %s", u["user_id"], e)
         await asyncio.sleep(0.04)
     log.info("%s -> %d users", d["slug"], sent)
+
+
+async def setup_commands(bot: Bot) -> None:
+    """Меню команд по кнопке «/»: обычным людям - короткое, админам - расширенное."""
+    user_cmds = [
+        BotCommand(command="start", description="Меню и список функций"),
+        BotCommand(command="status", description="Статус работы"),
+    ]
+    admin_cmds = user_cmds + [
+        BotCommand(command="users", description="Список людей"),
+        BotCommand(command="health", description="Состояние мониторинга"),
+        BotCommand(command="allow", description="Выдать доступ: /allow <id>"),
+        BotCommand(command="deny", description="Закрыть доступ: /deny <id>"),
+    ]
+    if config.PAID_MODE:
+        admin_cmds.append(BotCommand(command="grant", description="Продлить подписку: /grant <id> <дней>"))
+    try:
+        await bot.set_my_commands(user_cmds, scope=BotCommandScopeDefault())
+    except Exception as e:
+        log.warning("set_my_commands failed: %s", e)
+    for admin in config.ADMIN_IDS:
+        try:
+            await bot.set_my_commands(admin_cmds, scope=BotCommandScopeChat(chat_id=admin))
+        except Exception as e:  # админ ещё не писал боту - команды выставятся при следующем запуске
+            log.debug("admin commands for %s failed: %s", admin, e)

@@ -4,6 +4,9 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import (
+    BotCommand, BotCommandScopeChat, BotCommandScopeDefault, MenuButtonWebApp, WebAppInfo,
+)
 from aiohttp import web
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -16,9 +19,39 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("main")
 
 
+async def setup_menu(bot: Bot) -> None:
+    """Список команд (меню «/») и кнопка меню с приложением - без ручной настройки в BotFather."""
+    try:
+        user_cmds = [
+            BotCommand(command="start", description="Список функций"),
+            BotCommand(command="status", description="Мой доступ и статус работы"),
+        ]
+        admin_cmds = user_cmds + [
+            BotCommand(command="users", description="Список людей"),
+            BotCommand(command="health", description="Состояние мониторинга"),
+            BotCommand(command="allow", description="Выдать доступ: /allow ID"),
+            BotCommand(command="deny", description="Закрыть доступ: /deny ID"),
+        ]
+        if config.PAID_MODE:
+            admin_cmds.append(BotCommand(command="grant", description="Продлить подписку: /grant ID дней"))
+        await bot.set_my_commands(user_cmds, scope=BotCommandScopeDefault())
+        for admin in config.ADMIN_IDS:
+            try:
+                await bot.set_my_commands(admin_cmds, scope=BotCommandScopeChat(chat_id=admin))
+            except Exception as e:  # админ ещё не писал боту
+                log.debug("admin commands for %s: %s", admin, e)
+        if config.WEBAPP_URL:
+            await bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(text="Открыть", web_app=WebAppInfo(url=config.WEBAPP_URL)))
+    except Exception as e:
+        log.warning("setup_menu failed: %s", e)
+
+
 async def main() -> None:
     await db.init()
     bot = Bot(config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    await botmod.setup_commands(bot)
+    await setup_menu(bot)
 
     async def alert(text: str) -> None:
         """Сообщение всем админам."""
