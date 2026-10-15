@@ -13,7 +13,6 @@
 на маркете Telegram: флор коллекции, флор модели, флор фона, флор такой же пары модель+фон.
 """
 import asyncio
-import inspect
 import logging
 import random
 import re
@@ -33,7 +32,6 @@ from telethon.tl.functions.payments import (
 )
 
 from . import config, db
-from .markets import Portals
 
 log = logging.getLogger("monitor")
 
@@ -53,53 +51,7 @@ def stars_of(amt) -> int | None:
     return amt if isinstance(amt, int) else None
 
 
-def offer_field_supported() -> bool:
-    """Знает ли установленный Telethon поле offer_min_stars (иначе фильтр по офферам не включаем)."""
-    try:
-        return "offer_min_stars" in inspect.signature(tl.StarGiftUnique.__init__).parameters
-    except Exception:
-        return False
-
-
-def ton_of(amt) -> float | None:
-    """resell_amount (список с StarsTonAmount, нанотоны) -> цена в TON."""
-    if isinstance(amt, list):
-        v = next((a.amount for a in amt if type(a).__name__ == "StarsTonAmount"), None)
-        return v / 1e9 if isinstance(v, int) else None
-    return None
-
-
-def owner_contact(u) -> dict:
-    """Можно ли написать владельцу: нужен username; опционально отсекаем Premium-only и платные сообщения."""
-    out = {"owner_username": None, "owner_reachable": False, "owner_note": None}
-    if getattr(u, "deleted", False):
-        out["owner_note"] = "аккаунт удалён"
-        return out
-    if getattr(u, "bot", False):
-        out["owner_note"] = "владелец - бот"
-        return out
-    name = getattr(u, "username", None)
-    if not name:
-        for x in getattr(u, "usernames", None) or []:
-            if getattr(x, "active", True) and getattr(x, "username", None):
-                name = x.username
-                break
-    if not name:
-        out["owner_note"] = "нет username"
-        return out
-    out["owner_username"] = name
-    if not config.ALLOW_RESTRICTED:
-        if getattr(u, "contact_require_premium", False):
-            out["owner_note"] = "пишут только Premium"
-            return out
-        if (getattr(u, "send_paid_messages_stars", 0) or 0) > 0:
-            out["owner_note"] = "платные сообщения"
-            return out
-    out["owner_reachable"] = True
-    return out
-
-
-def parse(g, prefix: str, users=()) -> dict:
+def parse(g, prefix: str) -> dict:
     oid = getattr(g, "owner_id", None)
     d = {
         "slug": g.slug,
@@ -112,7 +64,6 @@ def parse(g, prefix: str, users=()) -> dict:
         "model": None, "model_rarity": None, "model_doc": None,
         "backdrop": None, "backdrop_rarity": None, "backdrop_id": None,
         "symbol": None, "symbol_rarity": None,
-        "offer_min": getattr(g, "offer_min_stars", None),  # мин. оффер в ⭐; None = оффер недоступен
         "owner_id": getattr(oid, "user_id", None),
         "owner_name": getattr(g, "owner_name", None),
         "owner_address": getattr(g, "owner_address", None),
@@ -123,14 +74,6 @@ def parse(g, prefix: str, users=()) -> dict:
         "backdrop_floor": None, "backdrop_listed": None,
         "combo_floor": None, "combo_listed": None,
     }
-    if d["owner_id"] is None:
-        d.update(owner_username=None, owner_reachable=False, owner_note="владелец скрыт или кошелёк")
-    else:
-        u = next((x for x in users if getattr(x, "id", None) == d["owner_id"]), None)
-        if u is not None:
-            d.update(owner_contact(u))
-        else:  # в ответе профиля нет - дозапросим позже (resolve_owner), если подарок кому-то подойдёт
-            d.update(owner_username=None, owner_reachable=None, owner_note=None)
     usd = getattr(g, "value_usd_amount", None)
     if isinstance(usd, int):
         d["est_usd"] = usd / 100  # предполагаем центы
@@ -181,43 +124,51 @@ class Limiter:
 
 
 class Monitor:
-    def __init__(self, client: TelegramClient, on_gift: Callable[[dict], Awaitable[None]]):
+    def __init__(self, client: TelegramClient, on_gift: Callable[[dict], Awaitable[None]],
+                 on_alert: Callable[[str], Awaitable[None]] | None = None):
         self.client = client
         self.on_gift = on_gift
+        self.on_alert = on_alert
+        self.started = time.monotonic()
+        self.last_ok = time.monotonic()
+        self.last_gift = time.monotonic()
+        self.stalled = False
         self.limiter = Limiter(config.RPS)
         self.state: dict[str, dict] = {}  # prefix -> {cursor, interval, next}
         self._stats: dict[tuple, tuple[float, tuple]] = {}
         self._tasks: set[asyncio.Task] = set()
         self._last_refresh = 0.0
-        self.ton_per_star: float | None = None  # курс по листингам Telegram: сколько TON в одной ⭐
-        self.portals = Portals() if config.PORTALS else None
-        self.offer_supported = offer_field_supported()
-        if config.ONLY_OFFERABLE and not self.offer_supported:
-            log.warning("Telethon не знает поле offer_min_stars - фильтр по офферам ОТКЛЮЧЁН. "
-                        "Обнови telethon (pip install -U telethon) и передеплой.")
 
     # ---------- low level ----------
     async def fetch(self, slug: str):
         while True:
             await self.limiter.wait()
             try:
-                return await self.client(GetUniqueStarGiftRequest(slug=slug))  # .gift + .users
+                r = await self.client(GetUniqueStarGiftRequest(slug=slug))
+                self._touch()
+                return r.gift
             except FATAL as e:
+                await self.alert(
+                    "fatal",
+                    f"🛑 Сессия Telegram сброшена ({type(e).__name__}). Сгенерируй новый SESSION_STRING "
+                    "и не запускай его в двух местах одновременно.")
                 raise SystemExit(
                     f"Сессия Telegram сброшена ({type(e).__name__}). Сгенерируй новый SESSION_STRING "
                     "и не используй его одновременно в двух местах.")
             except FloodWaitError as e:
                 self.limiter.punish()
                 log.warning("FloodWait %ss - замедляюсь", e.seconds)
+                await self._flood(e.seconds)
                 await asyncio.sleep(e.seconds + 2)
             except RPCError as e:
+                self._touch()  # сервер ответил - связь жива
                 msg = str(e).upper()
                 if "STARGIFT" not in msg and "SLUG" not in msg:
                     log.warning("RPC error on %s: %s", slug, e)
                 return None  # такого номера ещё нет
 
     async def exists(self, slug: str) -> bool:
-        return (await self.fetch(slug)) is not None
+        return await self.fetch(slug) is not None
 
     async def find_max(self, prefix: str) -> int:
         """Текущий максимальный номер (экспоненциальный + бинарный поиск)."""
@@ -247,18 +198,16 @@ class Monitor:
             kw = {"attributes": attrs} if attrs else {}
             r = await self.client(GetResaleStarGiftsRequest(
                 gift_id=gift_id, offset="", limit=1, sort_by_price=True, **kw))
+            self._touch()
             count = getattr(r, "count", None)
             if r.gifts:
-                amt = getattr(r.gifts[0], "resell_amount", None)
-                price = stars_of(amt)
-                ton = ton_of(amt)
-                if price and ton:
-                    self.ton_per_star = ton / price
+                price = stars_of(getattr(r.gifts[0], "resell_amount", None))
         except FATAL:
             raise
         except FloodWaitError as e:
             self.limiter.punish()
             log.warning("FloodWait %ss on market stats", e.seconds)
+            await self._flood(e.seconds)
         except Exception as e:  # схема TL меняется - не роняем мониторинг
             log.debug("market stats failed: %s", e)
         res = (price, count)
@@ -272,44 +221,20 @@ class Monitor:
         return (await self.stats(gift_id, [], "all"))[0]
 
     async def valuate(self, d: dict) -> None:
-        """Дописывает в подарок цены: Telegram (флор модели, фона, пары) и Portals."""
-        if d.get("valuated"):
+        """Дописывает в подарок флор модели, фона и пары модель+фон (с числом листингов)."""
+        if d.get("valuated") or not d.get("gift_id"):
             return
         d["valuated"] = True
-        gid = d.get("gift_id")
-        if gid:
-            model, back = _attr_ids(d)
-            if model:
-                d["model_floor"], d["model_listed"] = await self.stats(gid, [model], f"m:{d['model_doc']}")
-            if back:
-                d["backdrop_floor"], d["backdrop_listed"] = await self.stats(
-                    gid, [back], f"b:{d['backdrop_id']}")
-            if model and back:
-                d["combo_floor"], d["combo_listed"] = await self.stats(
-                    gid, [model, back], f"mb:{d['model_doc']}:{d['backdrop_id']}")
-        d["ton_per_star"] = self.ton_per_star
-        if self.portals:
-            try:
-                await self.portals.valuate(d)
-            except Exception as e:  # внешний маркет не должен ронять уведомления
-                log.debug("portals valuate failed: %s", e)
-
-    async def resolve_owner(self, d: dict) -> None:
-        """Если профиль владельца не пришёл вместе с подарком - дозапрашиваем (один запрос, через лимитер)."""
-        if d.get("owner_reachable") is not None:
-            return
-        try:
-            await self.limiter.wait()
-            ent = await self.client.get_entity(d["owner_id"])
-            d.update(owner_contact(ent))
-        except FATAL:
-            raise
-        except FloodWaitError as e:
-            self.limiter.punish()
-            log.warning("FloodWait %ss on get_entity", e.seconds)
-            d.update(owner_username=None, owner_reachable=False, owner_note="профиль не загрузился")
-        except Exception:
-            d.update(owner_username=None, owner_reachable=False, owner_note="профиль недоступен")
+        gid = d["gift_id"]
+        model, back = _attr_ids(d)
+        if model:
+            d["model_floor"], d["model_listed"] = await self.stats(gid, [model], f"m:{d['model_doc']}")
+        if back:
+            d["backdrop_floor"], d["backdrop_listed"] = await self.stats(
+                gid, [back], f"b:{d['backdrop_id']}")
+        if model and back:
+            d["combo_floor"], d["combo_listed"] = await self.stats(
+                gid, [model, back], f"mb:{d['model_doc']}:{d['backdrop_id']}")
 
     # ---------- collections ----------
     async def refresh_collections(self) -> None:
@@ -349,12 +274,13 @@ class Monitor:
         found = False
         n = s["cursor"] + 1
         while True:
-            r = await self.fetch(f"{prefix}-{n}")
-            if r is None:
+            g = await self.fetch(f"{prefix}-{n}")
+            if g is None:
                 return found
-            data = parse(r.gift, prefix, getattr(r, "users", None) or [])
+            data = parse(g, prefix)
             s["cursor"] = n
             await db.set_cursor(prefix, n)
+            self.last_gift = time.monotonic()
             if await db.save_gift(data):
                 t = asyncio.create_task(self._emit(data))
                 self._tasks.add(t)
@@ -377,6 +303,7 @@ class Monitor:
 
     async def run(self) -> None:
         await self.refresh_collections()
+        await self.alert("start", f"✅ Мониторинг запущен. Коллекций: {len(self.state)}.", cooldown=600)
         while True:
             if time.monotonic() - self._last_refresh > 1800:
                 await self.refresh_collections()
@@ -395,3 +322,70 @@ class Monitor:
             except Exception:
                 log.exception("check %s failed", p)
                 self.state[p]["next"] = time.monotonic() + config.MAX_INTERVAL
+
+    # ---------- контроль состояния ----------
+    def _touch(self) -> None:
+        self.last_ok = time.monotonic()
+
+    async def alert(self, kind: str, text: str, cooldown: float = 1800) -> None:
+        """Сообщение админам; одинаковые алерты не чаще, чем раз в cooldown секунд."""
+        if self.on_alert is None:
+            return
+        try:
+            if cooldown and not await db.should_alert(kind, cooldown):
+                return
+            await self.on_alert(text)
+        except Exception:
+            log.exception("alert failed")
+
+    async def _flood(self, seconds: int) -> None:
+        if seconds >= 120:
+            await self.alert(
+                "flood",
+                f"⏳ Telegram просит подождать {seconds // 60} мин (FloodWait). Бот замедлился сам; "
+                "если повторяется часто — уменьши RPS.", cooldown=3600)
+
+    async def watchdog(self) -> None:
+        """Раз в минуту проверяет, что мониторинг жив, и пишет админам при проблемах."""
+        while True:
+            await asyncio.sleep(60)
+            now = time.monotonic()
+            idle = now - self.last_ok
+            if idle > config.STALL_SECONDS and not self.stalled:
+                self.stalled = True
+                await self.alert(
+                    "stall",
+                    f"⚠️ Мониторинг не получает ответов от Telegram уже {_ago(idle)}. "
+                    "Возможен FloodWait или проблема с сессией. Состояние: /health")
+            elif idle <= config.STALL_SECONDS and self.stalled:
+                self.stalled = False
+                await self.alert("recovered", "✅ Мониторинг снова получает ответы Telegram.", cooldown=0)
+            quiet = now - self.last_gift
+            if not self.stalled and quiet > config.NO_GIFTS_HOURS * 3600:
+                await self.alert(
+                    "quiet",
+                    f"🤔 Новых улучшенных подарков нет уже {_ago(quiet)}. Проверь /health и логи.",
+                    cooldown=config.NO_GIFTS_HOURS * 3600)
+
+    def health(self) -> str:
+        now = time.monotonic()
+        pending = sum(1 for s in self.state.values() if s["cursor"] is None)
+        rate = 1.0 / (self.limiter.gap * self.limiter.penalty)
+        return (
+            "🩺 <b>Состояние</b>\n"
+            f"Работает: {_ago(now - self.started)}\n"
+            f"Коллекций: {len(self.state)} (ждут стартовой настройки: {pending})\n"
+            f"Последний ответ Telegram: {_ago(now - self.last_ok)} назад\n"
+            f"Последний новый подарок: {_ago(now - self.last_gift)} назад\n"
+            f"Скорость запросов: {rate:.1f}/с (штраф ×{self.limiter.penalty:.1f})"
+        )
+
+
+def _ago(sec: float) -> str:
+    sec = int(sec)
+    if sec < 60:
+        return f"{sec} с"
+    if sec < 3600:
+        return f"{sec // 60} мин"
+    h, m = divmod(sec // 60, 60)
+    return f"{h} ч {m} мин"
