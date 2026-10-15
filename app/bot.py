@@ -376,13 +376,16 @@ def render(d: dict, reasons: list[str] | None = None) -> str:
         price = f"~{d['floor']} ⭐ (флор коллекции)"
     else:
         price = "нет данных"
-    if d.get("owner_name"):
+    if d.get("owner_label"):
+        owner = e(d["owner_label"])
+    elif d.get("owner_name"):
         owner = e(d["owner_name"])
     elif d.get("owner_address"):
         owner = f"кошелёк <code>{e(d['owner_address'])}</code>"
     else:
         owner = "скрыт"
     total = f"/{d['total']}" if d.get("total") else ""
+    offer = f"от {d['offer_min']} ⭐" if d.get("offer_min") else "—"
     text = (
         f"🎁 <b>{e(d['collection'])} #{d['num']}</b>\n\n"
         f"Модель: <b>{e(d['model'] or '—')}</b>{_pct(d['model_rarity'])}\n"
@@ -390,6 +393,7 @@ def render(d: dict, reasons: list[str] | None = None) -> str:
         f"Узор: <b>{e(d['symbol'] or '—')}</b>{_pct(d['symbol_rarity'])}\n"
         f"Выпуск: {d['num']}{total}\n"
         f"Цена: {price}\n"
+        f"Мин. оффер: {offer}\n"
         f"Владелец: {owner}"
     )
     market = [x for x in (
@@ -407,17 +411,24 @@ def render(d: dict, reasons: list[str] | None = None) -> str:
     return text
 
 
-async def owner_url(client: TelegramClient, d: dict) -> str | None:
+async def owner_info(client: TelegramClient, d: dict) -> tuple[str | None, str | None]:
+    """(ссылка для сообщения владельцу, подпись для уведомления)."""
     uid = d.get("owner_id")
     if not uid:
-        return None
+        return None, None
+    url, label = f"tg://user?id={uid}", f"ID {uid}"
     try:
         ent = await client.get_entity(uid)
-        if getattr(ent, "username", None):
-            return f"https://t.me/{ent.username}"
+        name = " ".join(x for x in (getattr(ent, "first_name", None), getattr(ent, "last_name", None)) if x)
+        uname = getattr(ent, "username", None)
+        if uname:
+            url = f"https://t.me/{uname}"
+            label = f"{name} (@{uname})" if name else f"@{uname}"
+        elif name:
+            label = name
     except Exception:
         pass
-    return f"tg://user?id={uid}"
+    return url, label
 
 
 async def broadcast(bot: Bot, client: TelegramClient, monitor, d: dict) -> None:
@@ -426,7 +437,7 @@ async def broadcast(bot: Bot, client: TelegramClient, monitor, d: dict) -> None:
         return
     await monitor.valuate(d)  # запросы к маркету только если подарок вообще кому-то подходит
     rows = [[InlineKeyboardButton(text="🎁 Открыть подарок", url=f"https://t.me/nft/{d['slug']}")]]
-    url = await owner_url(client, d)
+    url, d["owner_label"] = await owner_info(client, d)
     if url:
         rows.append([InlineKeyboardButton(text="👤 Написать владельцу", url=url)])
     rows.append([InlineKeyboardButton(text="⭐ В избранное", callback_data=f"fav:{d['slug']}")])
