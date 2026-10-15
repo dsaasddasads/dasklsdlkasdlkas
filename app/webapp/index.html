@@ -36,12 +36,16 @@
   .on { color:#6fdc8c; } .off { color:#ff7b7b; }
   .sw { display:flex; justify-content:space-between; align-items:center; margin-top:14px; }
   .hint { font-size:12px; color:var(--muted); margin-top:6px; }
+  select, textarea { width:100%; padding:12px; border-radius:12px; border:1px solid #2b2b31;
+         background:var(--card); color:var(--text); font-size:15px; font-family:inherit; }
+  .row button { flex:1; }
 </style>
 </head>
 <body>
 <div class="tabs">
   <button class="tab active" data-tab="home">Главная</button>
   <button class="tab" data-tab="filters">Фильтры</button>
+  <button class="tab" data-tab="auto" id="tab-auto-btn" style="display:none">🤖 Авто</button>
   <button class="tab" data-tab="favs">⭐ Избранное</button>
 </div>
 
@@ -101,6 +105,23 @@
   <button id="save">Сохранить</button>
 </section>
 
+<section id="tab-auto">
+  <div class="status" id="auto_status">…</div>
+  <div class="row" id="auto_ctl"></div>
+
+  <h2>Настройки</h2>
+  <label>Сколько сообщений за один запуск</label>
+  <input type="number" id="auto_limit" min="1" max="5" value="5">
+  <label>Пауза между сообщениями, сек</label>
+  <input type="number" id="auto_gap" min="30" max="600" value="60">
+  <label>Текст сообщения</label>
+  <select id="auto_tpl"></select>
+  <textarea id="auto_text" rows="4" maxlength="500" style="display:none; margin-top:8px"
+            placeholder="Свой текст. Можно использовать {collection} и {num}"></textarea>
+  <div class="hint">Авто пишет только владельцам подарков, которые подошли под твои фильтры. Одному владельцу — не чаще раза в 72 часа. После лимита режим сам выключается. Ответы владельцев приходят в чат с ботом.</div>
+  <button id="auto_save">Сохранить настройки</button>
+</section>
+
 <section id="tab-favs">
   <div id="favs"></div>
 </section>
@@ -152,6 +173,7 @@ async function load(fill = true) {
     };
     $("plans").appendChild(b);
   });
+  renderAuto(fill);
   if (fill) fillForm();
 }
 
@@ -176,6 +198,49 @@ async function loadFavs() {
     box.appendChild(row);
   });
 }
+
+// авто-режим
+function renderAuto(fill) {
+  $("tab-auto-btn").style.display = ME.auto_available ? "" : "none";
+  if (!ME.auto_available) return;
+  const names = { off: "выключен", on: "работает", paused: "на паузе" };
+  $("auto_status").innerHTML = "🤖 Авто-режим: <b>" + names[ME.auto_state] + "</b> · отправлено " +
+    ME.auto_sent + " из " + ME.auto_limit +
+    (ME.enabled ? "" : '<br><span class="off">Работа остановлена — нажми «Начать работу» на главной</span>');
+  const ctl = $("auto_ctl"); ctl.innerHTML = "";
+  const mk = (text, action, cls) => {
+    const b = document.createElement("button"); b.textContent = text; if (cls) b.className = cls;
+    b.onclick = async () => { await api("/api/auto", { action }); load(false); };
+    ctl.appendChild(b);
+  };
+  if (ME.auto_state === "on") { mk("⏸ Пауза", "pause", "alt"); mk("⏹ Стоп", "stop", "stop"); }
+  else if (ME.auto_state === "paused") { mk("▶ Продолжить", "resume"); mk("⏹ Стоп", "stop", "stop"); }
+  else mk("▶ Запустить на " + ME.auto_limit, "start");
+  if (fill) {
+    $("auto_limit").max = ME.auto_max;
+    $("auto_gap").min = ME.auto_min_gap; $("auto_gap").max = ME.auto_max_gap;
+    $("auto_limit").value = ME.auto_limit; $("auto_gap").value = ME.auto_gap;
+    const sel = $("auto_tpl"); sel.innerHTML = "";
+    ME.templates.forEach((t, i) => {
+      const o = document.createElement("option"); o.value = i; o.textContent = "Шаблон " + (i + 1) + ": " + t; sel.appendChild(o);
+    });
+    const c = document.createElement("option"); c.value = "custom"; c.textContent = "✍️ Свой текст"; sel.appendChild(c);
+    sel.value = ME.auto_text ? "custom" : String(Math.min(ME.auto_tpl, ME.templates.length - 1));
+    $("auto_text").value = ME.auto_text;
+    $("auto_text").style.display = sel.value === "custom" ? "" : "none";
+  }
+}
+$("auto_tpl").onchange = () => { $("auto_text").style.display = $("auto_tpl").value === "custom" ? "" : "none"; };
+$("auto_save").onclick = async () => {
+  const custom = $("auto_tpl").value === "custom";
+  await api("/api/auto/settings", {
+    limit: $("auto_limit").value, gap: $("auto_gap").value,
+    tpl: custom ? ME.auto_tpl : $("auto_tpl").value, text: custom ? $("auto_text").value : "",
+  });
+  tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+  tg.showAlert("Сохранено");
+  load();
+};
 
 // вкладки
 document.querySelectorAll(".tab").forEach(t => t.onclick = () => {

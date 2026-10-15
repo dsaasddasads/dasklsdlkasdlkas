@@ -39,3 +39,15 @@ NO_GIFTS_HOURS = float(os.getenv("NO_GIFTS_HOURS", "6"))    # нет новых 
 # Какие подарки показывать
 ONLY_CONTACTABLE = os.getenv("ONLY_CONTACTABLE", "1") == "1"  # только если владельцу можно написать (обычный пользователь)
 REQUIRE_OFFER = os.getenv("REQUIRE_OFFER", "1") == "1"        # только если на подарок можно отправить Offer to Buy
+
+# Сообщения владельцам от имени юзербота (только по нажатию кнопки)
+RELAY = os.getenv("RELAY", "1") == "1"
+RELAY_DAILY_LIMIT = int(os.getenv("RELAY_DAILY_LIMIT", "15"))    # новых диалогов на человека за 24 ч
+RELAY_GLOBAL_DAILY = int(os.getenv("RELAY_GLOBAL_DAILY", "30"))  # новых диалогов всего за 24 ч
+RELAY_MIN_GAP = float(os.getenv("RELAY_MIN_GAP", "20"))          # пауза между отправками, сек
+RELAY_TEMPLATES = [t.strip() for t in os.getenv("RELAY_TEMPLATES", "").split("||") if t.strip()]
+
+# Авто-режим сообщений (включается админом для конкретных людей, жёсткие потолки)
+AUTO_MAX = int(os.getenv("AUTO_MAX", "5"))              # макс. сообщений за один запуск
+AUTO_MIN_GAP = int(os.getenv("AUTO_MIN_GAP", "30"))     # мин. пауза между авто-сообщениями, сек
+AUTO_MAX_GAP = int(os.getenv("AUTO_MAX_GAP", "600"))

@@ -8,7 +8,7 @@ from urllib.parse import parse_qsl
 from aiohttp import web
 from aiogram import Bot
 
-from . import bot as botmod, config, db
+from . import bot as botmod, config, db, relay
 
 INDEX = Path(__file__).parent / "webapp" / "index.html"
 
@@ -57,6 +57,16 @@ def _disc(v) -> float:
         return 0.0
 
 
+_app_log: dict[int, float] = {}
+
+
+async def _log_app(uid: int) -> None:
+    """Открытия приложения - не чаще раза в 10 минут на человека."""
+    if time.time() - _app_log.get(uid, 0) > 600:
+        _app_log[uid] = time.time()
+        await db.log_event(uid, "app")
+
+
 def make_app(bot: Bot) -> web.Application:
     app = web.Application()
 
@@ -78,6 +88,7 @@ def make_app(bot: Bot) -> web.Application:
     async def me(request):
         u = await auth(request)
         row = await db.get_user(u["id"])
+        await _log_app(u["id"])
         return web.json_response({
             "active": db.has_access(u["id"], row),
             "paid_mode": config.PAID_MODE,
@@ -90,6 +101,12 @@ def make_app(bot: Bot) -> web.Application:
             "exclude_collections": row["exclude_collections"], "exclude_models": row["exclude_models"],
             "exclude_backdrops": row["exclude_backdrops"], "min_discount": row["min_discount"],
             "plans": config.PLANS,
+            "auto_available": db.has_access(u["id"], row) and db.auto_allowed(row),
+            "auto_state": row["auto_state"], "auto_sent": row["auto_sent"],
+            "auto_limit": min(row["auto_limit"], config.AUTO_MAX), "auto_gap": row["auto_gap"],
+            "auto_tpl": row["auto_tpl"], "auto_text": row["auto_text"],
+            "auto_max": config.AUTO_MAX, "auto_min_gap": config.AUTO_MIN_GAP, "auto_max_gap": config.AUTO_MAX_GAP,
+            "templates": relay._tpls(),
         })
 
     async def toggle(request):
@@ -99,6 +116,7 @@ def make_app(bot: Bot) -> web.Application:
         if want and not db.has_access(u["id"], row):
             raise web.HTTPPaymentRequired()
         await db.set_enabled(u["id"], want)
+        await db.log_event(u["id"], "work_on" if want else "work_off")
         return web.json_response({"enabled": want})
 
     async def save(request):
@@ -117,6 +135,7 @@ def make_app(bot: Bot) -> web.Application:
             "exclude_backdrops": _list(b.get("exclude_backdrops")),
             "min_discount": _disc(b.get("min_discount")),
         })
+        await db.log_event(u["id"], "filters")
         return web.json_response({"ok": True})
 
     async def favorites(request):
@@ -128,6 +147,30 @@ def make_app(bot: Bot) -> web.Application:
     async def fav_remove(request):
         u = await auth(request)
         await db.remove_fav(u["id"], str((await request.json()).get("slug", "")))
+        return web.json_response({"ok": True})
+
+    async def _auto_user(request) -> dict:
+        u = await auth(request)
+        row = await db.get_user(u["id"])
+        if not (db.has_access(u["id"], row) and db.auto_allowed(row)):
+            raise web.HTTPForbidden()
+        return u
+
+    async def auto_ctl(request):
+        u = await _auto_user(request)
+        action = (await request.json()).get("action")
+        if action not in ("start", "pause", "resume", "stop"):
+            raise web.HTTPBadRequest()
+        row = await db.auto_control(u["id"], action)
+        await db.log_event(u["id"], f"auto_{action}")
+        return web.json_response({"auto_state": row["auto_state"], "auto_sent": row["auto_sent"]})
+
+    async def auto_settings(request):
+        u = await _auto_user(request)
+        b = await request.json()
+        await db.set_auto_settings(
+            u["id"], _int(b.get("limit")) or config.AUTO_MAX, _int(b.get("gap")) or 60,
+            _int(b.get("tpl")) or 0, str(b.get("text") or ""))
         return web.json_response({"ok": True})
 
     async def invoice(request):
@@ -146,5 +189,6 @@ def make_app(bot: Bot) -> web.Application:
         web.post("/api/filters", save),
         web.get("/api/favorites", favorites), web.post("/api/favorites/remove", fav_remove),
         web.post("/api/invoice", invoice),
+        web.post("/api/auto", auto_ctl), web.post("/api/auto/settings", auto_settings),
     ])
     return app

@@ -11,7 +11,9 @@ from aiogram.types import (
 )
 from telethon import TelegramClient
 
-from . import config, db
+from . import config, db, relay
+from .relay import TXT_AUTO
+from .stats import TXT_STATS
 
 log = logging.getLogger("bot")
 router = Router()
@@ -78,6 +80,13 @@ def menu_kb(u: dict | None, access: bool = True) -> ReplyKeyboardMarkup:
              KeyboardButton(text=TXT_FAVS)],
             [KeyboardButton(text=TXT_STATUS)] + app,
         ]
+    extra = []
+    if access and db.auto_allowed(u):
+        extra.append(KeyboardButton(text=TXT_AUTO))
+    if access and u and u["user_id"] in config.ADMIN_IDS:
+        extra.append(KeyboardButton(text=TXT_STATS))
+    if extra:
+        rows.append(extra)
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 
 
@@ -117,6 +126,7 @@ async def work_btn(m: Message):
         return
     want = m.text == TXT_START  # кнопка не переключает, а задаёт состояние - без путаницы при устаревшей подписи
     await db.set_enabled(m.from_user.id, want)
+    await db.log_event(m.from_user.id, "work_on" if want else "work_off")
     u["enabled"] = want
     await m.answer("▶ Работа начата — уведомления включены." if want
                    else "⏹ Работа завершена — уведомления выключены.", reply_markup=menu_kb(u))
@@ -190,6 +200,30 @@ async def deny(m: Message, command: CommandObject):
     await m.answer(f"⛔ Доступ закрыт: {uid}")
 
 
+@router.message(Command("autoallow"))
+async def autoallow(m: Message, command: CommandObject):
+    if m.from_user.id not in config.ADMIN_IDS:
+        return
+    try:
+        uid = int((command.args or "").strip())
+    except ValueError:
+        return await m.answer("Использование: /autoallow <user_id>")
+    await db.set_auto_ok(uid, True)
+    await m.answer(f"🤖 Авто-режим разрешён: {uid}. Он появится в его меню.")
+
+
+@router.message(Command("autodeny"))
+async def autodeny(m: Message, command: CommandObject):
+    if m.from_user.id not in config.ADMIN_IDS:
+        return
+    try:
+        uid = int((command.args or "").strip())
+    except ValueError:
+        return await m.answer("Использование: /autodeny <user_id>")
+    await db.set_auto_ok(uid, False)
+    await m.answer(f"⛔ Авто-режим закрыт: {uid}")
+
+
 # ---------- admin: пользователи и состояние ----------
 @router.message(Command("users"))
 async def users_cmd(m: Message):
@@ -213,7 +247,7 @@ async def users_cmd(m: Message):
         working += 1 if on else 0
         icon = "🟢" if on else ("⚪" if has else "🔒")
         name = f"@{html.escape(r['username'])}" if r["username"] else "—"
-        lines.append(f"{icon} {name} · <code>{uid}</code> · {acc}")
+        lines.append(f"{icon} {name} · <code>{uid}</code> · {acc}" + (" · 🤖" if r.get("auto_ok") else ""))
     for uid in sorted(config.ADMIN_IDS - seen):
         lines.append(f"⚪ — · <code>{uid}</code> · админ (не запускал бота)")
     if not lines:
@@ -255,6 +289,8 @@ async def paid(m: Message):
 @router.callback_query(F.data.startswith("fav:"))
 async def fav(c: CallbackQuery):
     added = await db.toggle_fav(c.from_user.id, c.data[4:])
+    if added:
+        await db.log_event(c.from_user.id, "fav", c.data[4:])
     await c.answer("⭐ Добавлено в избранное" if added else "Убрано из избранного")
 
 
@@ -269,6 +305,7 @@ async def hide(c: CallbackQuery):
     if not val:
         return await c.answer("Нечего скрывать", show_alert=True)
     await db.add_exclude(c.from_user.id, col, val)
+    await db.log_event(c.from_user.id, "hide", slug)
     await c.answer(f"🚫 Больше не покажу: {val}")
 
 
@@ -439,7 +476,11 @@ async def broadcast(bot: Bot, client: TelegramClient, monitor, d: dict) -> None:
     rows = [[InlineKeyboardButton(text="🎁 Открыть подарок", url=f"https://t.me/nft/{d['slug']}")]]
     url, d["owner_label"] = await owner_info(client, d)
     if url:
-        rows.append([InlineKeyboardButton(text="👤 Написать владельцу", url=url)])
+        if config.RELAY and d.get("owner_id"):
+            rows.append([InlineKeyboardButton(text="✉️ Написать", callback_data=f"msg:{d['slug']}"),
+                         InlineKeyboardButton(text="👤 Профиль", url=url)])
+        else:
+            rows.append([InlineKeyboardButton(text="👤 Написать владельцу", url=url)])
     rows.append([InlineKeyboardButton(text="⭐ В избранное", callback_data=f"fav:{d['slug']}")])
     rows.append([
         InlineKeyboardButton(text="🚫 Коллекция", callback_data=f"hide:c:{d['slug']}"),
@@ -454,6 +495,9 @@ async def broadcast(bot: Bot, client: TelegramClient, monitor, d: dict) -> None:
         try:
             await bot.send_message(u["user_id"], render(d, reasons), reply_markup=kb)
             sent += 1
+            await db.log_event(u["user_id"], "notify", d["slug"])
+            if u.get("auto_state") == "on" and db.auto_allowed(u) and d.get("owner_id"):
+                relay.schedule_auto(bot, client, monitor, u, d)
         except Exception as e:
             log.debug("send to %s failed: %s", u["user_id"], e)
         await asyncio.sleep(0.04)
@@ -471,6 +515,9 @@ async def setup_commands(bot: Bot) -> None:
         BotCommand(command="health", description="Состояние мониторинга"),
         BotCommand(command="allow", description="Выдать доступ: /allow <id>"),
         BotCommand(command="deny", description="Закрыть доступ: /deny <id>"),
+        BotCommand(command="stats", description="Статистика: /stats или /stats <id>"),
+        BotCommand(command="autoallow", description="Разрешить авто-режим: /autoallow <id>"),
+        BotCommand(command="autodeny", description="Закрыть авто-режим: /autodeny <id>"),
     ]
     if config.PAID_MODE:
         admin_cmds.append(BotCommand(command="grant", description="Продлить подписку: /grant <id> <дней>"))

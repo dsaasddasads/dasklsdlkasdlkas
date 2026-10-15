@@ -11,7 +11,7 @@ from aiohttp import web
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
-from . import bot as botmod, config, db
+from . import bot as botmod, config, db, relay, stats
 from .monitor import Monitor
 from .web import make_app
 
@@ -62,7 +62,7 @@ async def main() -> None:
                 log.debug("alert to %s failed: %s", admin, e)
 
     client = TelegramClient(StringSession(config.SESSION_STRING), config.API_ID, config.API_HASH,
-                            receive_updates=False)
+                            receive_updates=config.RELAY)
     await client.connect()
     if not await client.is_user_authorized():
         if await db.should_alert("session", 1800):
@@ -76,10 +76,15 @@ async def main() -> None:
         await botmod.broadcast(bot, client, monitor, d)
 
     monitor = Monitor(client, on_gift, alert)
+    if config.RELAY:
+        relay.setup(client, bot)  # пересылка ответов владельцев в бота
 
     dp = Dispatcher()
     dp.include_router(botmod.router)
+    dp.include_router(relay.router)
+    dp.include_router(stats.router)
     dp["monitor"] = monitor
+    dp["client"] = client
 
     runner = web.AppRunner(make_app(bot))
     await runner.setup()

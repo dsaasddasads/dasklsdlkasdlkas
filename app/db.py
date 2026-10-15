@@ -29,6 +29,24 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS exclude_models      TEXT[] NOT NULL D
 ALTER TABLE users ADD COLUMN IF NOT EXISTS exclude_backdrops   TEXT[] NOT NULL DEFAULT '{}';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS min_discount        REAL   NOT NULL DEFAULT 0;
 
+ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_ok    BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_state TEXT    NOT NULL DEFAULT 'off';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_limit INT     NOT NULL DEFAULT 5;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_gap   INT     NOT NULL DEFAULT 60;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_tpl   INT     NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_text  TEXT    NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_sent  INT     NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS events (
+    id      BIGSERIAL PRIMARY KEY,
+    ts      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    user_id BIGINT NOT NULL,
+    kind    TEXT NOT NULL,
+    slug    TEXT
+);
+CREATE INDEX IF NOT EXISTS events_ts_idx   ON events(ts);
+CREATE INDEX IF NOT EXISTS events_user_idx ON events(user_id, kind);
+
 CREATE TABLE IF NOT EXISTS cursors (
     prefix   TEXT PRIMARY KEY,
     last_num INT NOT NULL DEFAULT 0
@@ -39,6 +57,17 @@ CREATE TABLE IF NOT EXISTS gifts (
     num        INT NOT NULL,
     data       JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS threads (
+    id         SERIAL PRIMARY KEY,
+    buyer_id   BIGINT NOT NULL,
+    owner_id   BIGINT NOT NULL,
+    owner_hash BIGINT,
+    slug       TEXT NOT NULL,
+    collection TEXT,
+    num        INT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_in    TIMESTAMPTZ
 );
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
@@ -174,7 +203,7 @@ async def list_favs(uid: int) -> list[dict]:
 # ---------- admin ----------
 async def list_users() -> list[dict]:
     rows = await pool.fetch(
-        "SELECT user_id, username, enabled, allowed, sub_until FROM users ORDER BY created_at")
+        "SELECT user_id, username, enabled, allowed, sub_until, auto_ok, auto_state FROM users ORDER BY created_at")
     return [dict(r) for r in rows]
 
 
@@ -206,3 +235,129 @@ async def add_exclude(uid: int, col: str, value: str) -> None:
     await pool.execute(
         f"UPDATE users SET {col} = array_append({col}, $2) "
         f"WHERE user_id=$1 AND NOT ($2 = ANY({col}))", uid, value)
+
+
+# ---------- диалоги с владельцами ----------
+async def create_thread(buyer_id: int, owner_id: int, owner_hash: int | None,
+                        slug: str, collection: str | None, num: int | None) -> int:
+    return await pool.fetchval(
+        "INSERT INTO threads(buyer_id, owner_id, owner_hash, slug, collection, num) "
+        "VALUES($1,$2,$3,$4,$5,$6) RETURNING id",
+        buyer_id, owner_id, owner_hash, slug, collection, num)
+
+
+async def get_thread(tid: int) -> dict | None:
+    row = await pool.fetchrow("SELECT * FROM threads WHERE id=$1", tid)
+    return dict(row) if row else None
+
+
+async def thread_for(buyer_id: int, owner_id: int) -> dict | None:
+    """Недавний диалог этого человека с этим владельцем (72 часа)."""
+    row = await pool.fetchrow(
+        "SELECT * FROM threads WHERE buyer_id=$1 AND owner_id=$2 "
+        "AND created_at > now() - interval '72 hours' ORDER BY created_at DESC LIMIT 1",
+        buyer_id, owner_id)
+    return dict(row) if row else None
+
+
+async def latest_thread_for_owner(owner_id: int) -> dict | None:
+    row = await pool.fetchrow(
+        "SELECT * FROM threads WHERE owner_id=$1 AND created_at > now() - interval '14 days' "
+        "ORDER BY COALESCE(last_in, created_at) DESC, created_at DESC LIMIT 1", owner_id)
+    return dict(row) if row else None
+
+
+async def touch_thread_in(tid: int) -> None:
+    await pool.execute("UPDATE threads SET last_in=now() WHERE id=$1", tid)
+
+
+async def count_threads(hours: int, buyer_id: int | None) -> int:
+    if buyer_id is None:
+        return await pool.fetchval(
+            "SELECT count(*) FROM threads WHERE created_at > now() - make_interval(hours => $1)", hours)
+    return await pool.fetchval(
+        "SELECT count(*) FROM threads WHERE buyer_id=$2 AND created_at > now() - make_interval(hours => $1)",
+        hours, buyer_id)
+
+
+# ---------- авто-режим ----------
+def auto_allowed(u: dict | None) -> bool:
+    """Авто-сообщения доступны админам и тем, кому админ их разрешил."""
+    return bool(config.RELAY and u and (u["user_id"] in config.ADMIN_IDS or u.get("auto_ok")))
+
+
+async def set_auto_ok(uid: int, ok: bool) -> None:
+    await pool.execute(
+        "INSERT INTO users(user_id, auto_ok) VALUES($1, $2) "
+        "ON CONFLICT (user_id) DO UPDATE SET auto_ok = EXCLUDED.auto_ok, "
+        "auto_state = CASE WHEN EXCLUDED.auto_ok THEN users.auto_state ELSE 'off' END",
+        uid, ok)
+
+
+async def set_auto_settings(uid: int, limit, gap, tpl, text: str) -> None:
+    limit = max(1, min(int(limit), config.AUTO_MAX))
+    gap = max(config.AUTO_MIN_GAP, min(int(gap), config.AUTO_MAX_GAP))
+    tpl = max(0, int(tpl))
+    await pool.execute(
+        "UPDATE users SET auto_limit=$2, auto_gap=$3, auto_tpl=$4, auto_text=$5 WHERE user_id=$1",
+        uid, limit, gap, tpl, (text or "").strip()[:500])
+
+
+async def auto_control(uid: int, action: str) -> dict | None:
+    sql = {
+        "start": "UPDATE users SET auto_state='on', auto_sent=0 WHERE user_id=$1 RETURNING *",
+        "pause": "UPDATE users SET auto_state='paused' WHERE user_id=$1 AND auto_state='on' RETURNING *",
+        "resume": "UPDATE users SET auto_state='on' WHERE user_id=$1 AND auto_state='paused' RETURNING *",
+        "stop": "UPDATE users SET auto_state='off' WHERE user_id=$1 RETURNING *",
+    }[action]
+    row = await pool.fetchrow(sql, uid)
+    return dict(row) if row else await get_user(uid)
+
+
+async def auto_incr(uid: int) -> dict:
+    """+1 отправленное авто-сообщение; при достижении лимита режим сам выключается."""
+    row = await pool.fetchrow(
+        "UPDATE users SET auto_sent = auto_sent + 1, "
+        "auto_state = CASE WHEN auto_sent + 1 >= LEAST(auto_limit, $2) THEN 'off' ELSE auto_state END "
+        "WHERE user_id=$1 RETURNING auto_sent, auto_limit, auto_state", uid, config.AUTO_MAX)
+    return dict(row)
+
+
+# ---------- события и статистика ----------
+async def log_event(uid: int, kind: str, slug: str | None = None) -> None:
+    try:
+        await pool.execute("INSERT INTO events(user_id, kind, slug) VALUES($1,$2,$3)", uid, kind, slug)
+    except Exception:  # статистика не должна ломать работу бота
+        pass
+
+
+async def event_counts(hours: int, uid: int | None = None) -> list[dict]:
+    if uid is None:
+        rows = await pool.fetch(
+            "SELECT user_id, kind, count(*)::int AS c FROM events "
+            "WHERE ts > now() - make_interval(hours => $1) GROUP BY user_id, kind", hours)
+    else:
+        rows = await pool.fetch(
+            "SELECT user_id, kind, count(*)::int AS c FROM events "
+            "WHERE ts > now() - make_interval(hours => $1) AND user_id=$2 GROUP BY user_id, kind", hours, uid)
+    return [dict(r) for r in rows]
+
+
+async def last_seen() -> dict:
+    rows = await pool.fetch("SELECT user_id, max(ts) AS ts FROM events GROUP BY user_id")
+    return {r["user_id"]: r["ts"] for r in rows}
+
+
+async def gifts_count(hours: int) -> int:
+    return await pool.fetchval(
+        "SELECT count(*)::int FROM gifts WHERE created_at > now() - make_interval(hours => $1)", hours)
+
+
+async def thread_totals() -> tuple[int, int]:
+    row = await pool.fetchrow("SELECT count(*)::int AS total, count(last_in)::int AS replied FROM threads")
+    return row["total"], row["replied"]
+
+
+async def user_threads(uid: int, n: int = 5) -> list[dict]:
+    rows = await pool.fetch("SELECT * FROM threads WHERE buyer_id=$1 ORDER BY created_at DESC LIMIT $2", uid, n)
+    return [dict(r) for r in rows]
