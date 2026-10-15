@@ -29,6 +29,17 @@ PLANS = {7: int(os.getenv("PRICE_7D", "2000"))}
 PREMIUM_X = float(os.getenv("PREMIUM_X", "1.5"))   # во сколько раз модель/фон должны быть дороже флора коллекции
 MIN_LISTED = int(os.getenv("MIN_LISTED", "3"))     # мин. число листингов, чтобы флор считался надёжным
 
-# Контроль состояния: уведомления админам
-STALL_SECONDS = int(os.getenv("STALL_SECONDS", "300"))      # нет ответов Telegram дольше - тревога
-NO_GIFTS_HOURS = float(os.getenv("NO_GIFTS_HOURS", "6"))    # нет новых подарков дольше - предупреждение
+# Оффер: уведомления только по подаркам, на которые Telegram разрешает отправить оффер (поле offer_min_stars)
+ONLY_OFFERABLE = os.getenv("ONLY_OFFERABLE", "1") == "1"
+# Кому можно написать: уведомления только по подаркам, у владельца которых есть username и нет
+# ограничений на сообщения. Работает вместе с ONLY_OFFERABLE: подарок должен пройти оба фильтра
+ONLY_REACHABLE = os.getenv("ONLY_REACHABLE", "1") == "1"
+# 1 = не отсекать владельцев с настройкой "писать могут только Premium" / платные сообщения
+ALLOW_RESTRICTED = os.getenv("ALLOW_RESTRICTED", "0") == "1"
+# Текст, который подставляется в чат по кнопке "Написать владельцу". Поля: {collection} {num} {link}
+MSG_TEMPLATE = os.getenv("MSG_TEMPLATE", "Привет! Продаёшь {collection} #{num}? {link}")
+
+# Цены с Portals (публичный API, без авторизации). PORTALS=0 - выключить
+PORTALS = os.getenv("PORTALS", "1") == "1"
+# Если в листинге цена ниже цены Portals на столько % - считаем выгодным (режим выгодных)
+PORTALS_DISCOUNT = float(os.getenv("PORTALS_DISCOUNT", "15"))
