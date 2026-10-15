@@ -13,6 +13,7 @@
 на маркете Telegram: флор коллекции, флор модели, флор фона, флор такой же пары модель+фон.
 """
 import asyncio
+import inspect
 import logging
 import random
 import re
@@ -32,6 +33,7 @@ from telethon.tl.functions.payments import (
 )
 
 from . import config, db
+from .markets import Portals
 
 log = logging.getLogger("monitor")
 
@@ -51,7 +53,53 @@ def stars_of(amt) -> int | None:
     return amt if isinstance(amt, int) else None
 
 
-def parse(g, prefix: str) -> dict:
+def offer_field_supported() -> bool:
+    """Знает ли установленный Telethon поле offer_min_stars (иначе фильтр по офферам не включаем)."""
+    try:
+        return "offer_min_stars" in inspect.signature(tl.StarGiftUnique.__init__).parameters
+    except Exception:
+        return False
+
+
+def ton_of(amt) -> float | None:
+    """resell_amount (список с StarsTonAmount, нанотоны) -> цена в TON."""
+    if isinstance(amt, list):
+        v = next((a.amount for a in amt if type(a).__name__ == "StarsTonAmount"), None)
+        return v / 1e9 if isinstance(v, int) else None
+    return None
+
+
+def owner_contact(u) -> dict:
+    """Можно ли написать владельцу: нужен username; опционально отсекаем Premium-only и платные сообщения."""
+    out = {"owner_username": None, "owner_reachable": False, "owner_note": None}
+    if getattr(u, "deleted", False):
+        out["owner_note"] = "аккаунт удалён"
+        return out
+    if getattr(u, "bot", False):
+        out["owner_note"] = "владелец - бот"
+        return out
+    name = getattr(u, "username", None)
+    if not name:
+        for x in getattr(u, "usernames", None) or []:
+            if getattr(x, "active", True) and getattr(x, "username", None):
+                name = x.username
+                break
+    if not name:
+        out["owner_note"] = "нет username"
+        return out
+    out["owner_username"] = name
+    if not config.ALLOW_RESTRICTED:
+        if getattr(u, "contact_require_premium", False):
+            out["owner_note"] = "пишут только Premium"
+            return out
+        if (getattr(u, "send_paid_messages_stars", 0) or 0) > 0:
+            out["owner_note"] = "платные сообщения"
+            return out
+    out["owner_reachable"] = True
+    return out
+
+
+def parse(g, prefix: str, users=()) -> dict:
     oid = getattr(g, "owner_id", None)
     d = {
         "slug": g.slug,
@@ -64,6 +112,7 @@ def parse(g, prefix: str) -> dict:
         "model": None, "model_rarity": None, "model_doc": None,
         "backdrop": None, "backdrop_rarity": None, "backdrop_id": None,
         "symbol": None, "symbol_rarity": None,
+        "offer_min": getattr(g, "offer_min_stars", None),  # мин. оффер в ⭐; None = оффер недоступен
         "owner_id": getattr(oid, "user_id", None),
         "owner_name": getattr(g, "owner_name", None),
         "owner_address": getattr(g, "owner_address", None),
@@ -74,6 +123,14 @@ def parse(g, prefix: str) -> dict:
         "backdrop_floor": None, "backdrop_listed": None,
         "combo_floor": None, "combo_listed": None,
     }
+    if d["owner_id"] is None:
+        d.update(owner_username=None, owner_reachable=False, owner_note="владелец скрыт или кошелёк")
+    else:
+        u = next((x for x in users if getattr(x, "id", None) == d["owner_id"]), None)
+        if u is not None:
+            d.update(owner_contact(u))
+        else:  # в ответе профиля нет - дозапросим позже (resolve_owner), если подарок кому-то подойдёт
+            d.update(owner_username=None, owner_reachable=None, owner_note=None)
     usd = getattr(g, "value_usd_amount", None)
     if isinstance(usd, int):
         d["est_usd"] = usd / 100  # предполагаем центы
@@ -132,14 +189,19 @@ class Monitor:
         self._stats: dict[tuple, tuple[float, tuple]] = {}
         self._tasks: set[asyncio.Task] = set()
         self._last_refresh = 0.0
+        self.ton_per_star: float | None = None  # курс по листингам Telegram: сколько TON в одной ⭐
+        self.portals = Portals() if config.PORTALS else None
+        self.offer_supported = offer_field_supported()
+        if config.ONLY_OFFERABLE and not self.offer_supported:
+            log.warning("Telethon не знает поле offer_min_stars - фильтр по офферам ОТКЛЮЧЁН. "
+                        "Обнови telethon (pip install -U telethon) и передеплой.")
 
     # ---------- low level ----------
     async def fetch(self, slug: str):
         while True:
             await self.limiter.wait()
             try:
-                r = await self.client(GetUniqueStarGiftRequest(slug=slug))
-                return r.gift
+                return await self.client(GetUniqueStarGiftRequest(slug=slug))  # .gift + .users
             except FATAL as e:
                 raise SystemExit(
                     f"Сессия Telegram сброшена ({type(e).__name__}). Сгенерируй новый SESSION_STRING "
@@ -155,7 +217,7 @@ class Monitor:
                 return None  # такого номера ещё нет
 
     async def exists(self, slug: str) -> bool:
-        return await self.fetch(slug) is not None
+        return (await self.fetch(slug)) is not None
 
     async def find_max(self, prefix: str) -> int:
         """Текущий максимальный номер (экспоненциальный + бинарный поиск)."""
@@ -187,7 +249,11 @@ class Monitor:
                 gift_id=gift_id, offset="", limit=1, sort_by_price=True, **kw))
             count = getattr(r, "count", None)
             if r.gifts:
-                price = stars_of(getattr(r.gifts[0], "resell_amount", None))
+                amt = getattr(r.gifts[0], "resell_amount", None)
+                price = stars_of(amt)
+                ton = ton_of(amt)
+                if price and ton:
+                    self.ton_per_star = ton / price
         except FATAL:
             raise
         except FloodWaitError as e:
@@ -206,20 +272,44 @@ class Monitor:
         return (await self.stats(gift_id, [], "all"))[0]
 
     async def valuate(self, d: dict) -> None:
-        """Дописывает в подарок флор модели, фона и пары модель+фон (с числом листингов)."""
-        if d.get("valuated") or not d.get("gift_id"):
+        """Дописывает в подарок цены: Telegram (флор модели, фона, пары) и Portals."""
+        if d.get("valuated"):
             return
         d["valuated"] = True
-        gid = d["gift_id"]
-        model, back = _attr_ids(d)
-        if model:
-            d["model_floor"], d["model_listed"] = await self.stats(gid, [model], f"m:{d['model_doc']}")
-        if back:
-            d["backdrop_floor"], d["backdrop_listed"] = await self.stats(
-                gid, [back], f"b:{d['backdrop_id']}")
-        if model and back:
-            d["combo_floor"], d["combo_listed"] = await self.stats(
-                gid, [model, back], f"mb:{d['model_doc']}:{d['backdrop_id']}")
+        gid = d.get("gift_id")
+        if gid:
+            model, back = _attr_ids(d)
+            if model:
+                d["model_floor"], d["model_listed"] = await self.stats(gid, [model], f"m:{d['model_doc']}")
+            if back:
+                d["backdrop_floor"], d["backdrop_listed"] = await self.stats(
+                    gid, [back], f"b:{d['backdrop_id']}")
+            if model and back:
+                d["combo_floor"], d["combo_listed"] = await self.stats(
+                    gid, [model, back], f"mb:{d['model_doc']}:{d['backdrop_id']}")
+        d["ton_per_star"] = self.ton_per_star
+        if self.portals:
+            try:
+                await self.portals.valuate(d)
+            except Exception as e:  # внешний маркет не должен ронять уведомления
+                log.debug("portals valuate failed: %s", e)
+
+    async def resolve_owner(self, d: dict) -> None:
+        """Если профиль владельца не пришёл вместе с подарком - дозапрашиваем (один запрос, через лимитер)."""
+        if d.get("owner_reachable") is not None:
+            return
+        try:
+            await self.limiter.wait()
+            ent = await self.client.get_entity(d["owner_id"])
+            d.update(owner_contact(ent))
+        except FATAL:
+            raise
+        except FloodWaitError as e:
+            self.limiter.punish()
+            log.warning("FloodWait %ss on get_entity", e.seconds)
+            d.update(owner_username=None, owner_reachable=False, owner_note="профиль не загрузился")
+        except Exception:
+            d.update(owner_username=None, owner_reachable=False, owner_note="профиль недоступен")
 
     # ---------- collections ----------
     async def refresh_collections(self) -> None:
@@ -259,10 +349,10 @@ class Monitor:
         found = False
         n = s["cursor"] + 1
         while True:
-            g = await self.fetch(f"{prefix}-{n}")
-            if g is None:
+            r = await self.fetch(f"{prefix}-{n}")
+            if r is None:
                 return found
-            data = parse(g, prefix)
+            data = parse(r.gift, prefix, getattr(r, "users", None) or [])
             s["cursor"] = n
             await db.set_cursor(prefix, n)
             if await db.save_gift(data):
