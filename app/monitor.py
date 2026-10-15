@@ -13,6 +13,7 @@
 на маркете Telegram: флор коллекции, флор модели, флор фона, флор такой же пары модель+фон.
 """
 import asyncio
+import inspect
 import logging
 import random
 import re
@@ -34,6 +35,15 @@ from telethon.tl.functions.payments import (
 from . import config, db
 
 log = logging.getLogger("monitor")
+
+# Поле offer_min_stars есть только в схеме Telethon со слоем 220+ (Gift Offers)
+try:
+    OFFER_SUPPORTED = "offer_min_stars" in inspect.signature(tl.StarGiftUnique.__init__).parameters
+except Exception:
+    OFFER_SUPPORTED = False
+if not OFFER_SUPPORTED:
+    logging.getLogger("monitor").warning(
+        "Telethon слишком старый: нет offer_min_stars, фильтр по офферам отключён. Обнови telethon>=1.45.0")
 
 FATAL = (AuthKeyDuplicatedError, AuthKeyUnregisteredError, SessionRevokedError,
          SessionExpiredError, UserDeactivatedError, UserDeactivatedBanError)
@@ -67,6 +77,7 @@ def parse(g, prefix: str) -> dict:
         "owner_id": getattr(oid, "user_id", None),
         "owner_name": getattr(g, "owner_name", None),
         "owner_address": getattr(g, "owner_address", None),
+        "offer_min": getattr(g, "offer_min_stars", None),  # мин. цена оффера в Stars; None = офферы недоступны
         "ask": stars_of(getattr(g, "resell_amount", None)),  # цена, если уже выставлен на продажу
         "est_usd": None,                                      # оценка самого Telegram, $
         "floor": None,
@@ -90,6 +101,15 @@ def parse(g, prefix: str) -> dict:
         elif kind == "StarGiftAttributePattern":
             d["symbol"], d["symbol_rarity"] = a.name, r
     return d
+
+
+def usable(d: dict) -> bool:
+    """Подарок подходит, если владельцу можно написать и на подарок можно отправить Offer to Buy."""
+    if config.ONLY_CONTACTABLE and not d.get("owner_id"):
+        return False  # владелец скрыт, канал или кошелёк TON
+    if config.REQUIRE_OFFER and OFFER_SUPPORTED and d.get("offer_min") is None:
+        return False
+    return True
 
 
 def _attr_ids(d: dict):
@@ -133,6 +153,8 @@ class Monitor:
         self.last_ok = time.monotonic()
         self.last_gift = time.monotonic()
         self.stalled = False
+        self.passed = 0
+        self.skipped = 0
         self.limiter = Limiter(config.RPS)
         self.state: dict[str, dict] = {}  # prefix -> {cursor, interval, next}
         self._stats: dict[tuple, tuple[float, tuple]] = {}
@@ -262,6 +284,10 @@ class Monitor:
 
     # ---------- main loop ----------
     async def _emit(self, data: dict) -> None:
+        if not usable(data):  # до запросов к маркету - экономим запросы
+            self.skipped += 1
+            return
+        self.passed += 1
         try:
             data["floor"] = await self.floor(data.get("gift_id"))
             await self.on_gift(data)
@@ -377,7 +403,8 @@ class Monitor:
             f"Коллекций: {len(self.state)} (ждут стартовой настройки: {pending})\n"
             f"Последний ответ Telegram: {_ago(now - self.last_ok)} назад\n"
             f"Последний новый подарок: {_ago(now - self.last_gift)} назад\n"
-            f"Скорость запросов: {rate:.1f}/с (штраф ×{self.limiter.penalty:.1f})"
+            f"Скорость запросов: {rate:.1f}/с (штраф ×{self.limiter.penalty:.1f})\n"
+            f"Подходящих подарков: {self.passed}, пропущено (нельзя написать или оффер): {self.skipped}"
         )
 
 
