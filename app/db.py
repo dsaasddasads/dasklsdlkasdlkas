@@ -24,6 +24,10 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS profit_mode   BOOLEAN NOT NULL DEFAUL
 ALTER TABLE users ADD COLUMN IF NOT EXISTS profit_rarity REAL    NOT NULL DEFAULT 1.0;
 ALTER TABLE users ALTER COLUMN enabled SET DEFAULT FALSE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS exclude_collections TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS exclude_models      TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS exclude_backdrops   TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS min_discount        REAL   NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS cursors (
     prefix   TEXT PRIMARY KEY,
@@ -72,9 +76,11 @@ async def set_enabled(uid: int, enabled: bool) -> None:
 async def set_filters(uid: int, f: dict) -> None:
     await pool.execute(
         "UPDATE users SET collections=$2, models=$3, backdrops=$4, price_min=$5, price_max=$6, "
-        "profit_mode=$7, profit_rarity=$8 WHERE user_id=$1",
+        "profit_mode=$7, profit_rarity=$8, exclude_collections=$9, exclude_models=$10, "
+        "exclude_backdrops=$11, min_discount=$12 WHERE user_id=$1",
         uid, f["collections"], f["models"], f["backdrops"], f["price_min"], f["price_max"],
-        f["profit_mode"], f["profit_rarity"],
+        f["profit_mode"], f["profit_rarity"], f["exclude_collections"], f["exclude_models"],
+        f["exclude_backdrops"], f["min_discount"],
     )
 
 

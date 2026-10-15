@@ -8,6 +8,9 @@
   * адаптивные интервалы: "горячие" коллекции опрашиваются чаще, "холодные" реже;
   * случайный разброс (jitter) и штраф к скорости после FloodWait;
   * проверка по одной коллекции за раз, без пачек параллельных запросов.
+
+Оценка рынка (valuate): для подарка, который кому-то подходит, берём цены текущих листингов
+на маркете Telegram: флор коллекции, флор модели, флор фона, флор такой же пары модель+фон.
 """
 import asyncio
 import logging
@@ -21,6 +24,7 @@ from telethon.errors import (
     AuthKeyDuplicatedError, AuthKeyUnregisteredError, FloodWaitError, RPCError,
     SessionExpiredError, SessionRevokedError, UserDeactivatedBanError, UserDeactivatedError,
 )
+from telethon.tl import types as tl
 from telethon.tl.functions.payments import (
     GetResaleStarGiftsRequest,
     GetStarGiftsRequest,
@@ -40,6 +44,13 @@ def prefix_of(title: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", title)
 
 
+def stars_of(amt) -> int | None:
+    """resell_amount (список StarsAmount / число) -> цена в Stars."""
+    if isinstance(amt, list):
+        amt = next((a.amount for a in amt if type(a).__name__ == "StarsAmount"), None)
+    return amt if isinstance(amt, int) else None
+
+
 def parse(g, prefix: str) -> dict:
     oid = getattr(g, "owner_id", None)
     d = {
@@ -50,30 +61,44 @@ def parse(g, prefix: str) -> dict:
         "issued": getattr(g, "availability_issued", None),
         "total": getattr(g, "availability_total", None),
         "gift_id": getattr(g, "gift_id", None),
-        "model": None, "model_rarity": None,
-        "backdrop": None, "backdrop_rarity": None,
+        "model": None, "model_rarity": None, "model_doc": None,
+        "backdrop": None, "backdrop_rarity": None, "backdrop_id": None,
         "symbol": None, "symbol_rarity": None,
         "owner_id": getattr(oid, "user_id", None),
         "owner_name": getattr(g, "owner_name", None),
         "owner_address": getattr(g, "owner_address", None),
-        "ask": None,
+        "ask": stars_of(getattr(g, "resell_amount", None)),  # цена, если уже выставлен на продажу
+        "est_usd": None,                                      # оценка самого Telegram, $
         "floor": None,
+        "model_floor": None, "model_listed": None,
+        "backdrop_floor": None, "backdrop_listed": None,
+        "combo_floor": None, "combo_listed": None,
     }
+    usd = getattr(g, "value_usd_amount", None)
+    if isinstance(usd, int):
+        d["est_usd"] = usd / 100  # предполагаем центы
     for a in g.attributes:
         kind = type(a).__name__
         r = getattr(a, "rarity_permille", None)
         r = r if isinstance(r, int) else None
         if kind == "StarGiftAttributeModel":
             d["model"], d["model_rarity"] = a.name, r
+            d["model_doc"] = getattr(getattr(a, "document", None), "id", None)
         elif kind == "StarGiftAttributeBackdrop":
             d["backdrop"], d["backdrop_rarity"] = a.name, r
+            d["backdrop_id"] = getattr(a, "backdrop_id", None)
         elif kind == "StarGiftAttributePattern":
             d["symbol"], d["symbol_rarity"] = a.name, r
-    amt = getattr(g, "resell_amount", None)  # цена, если подарок уже выставлен на продажу
-    if isinstance(amt, list):
-        amt = next((x.amount for x in amt if type(x).__name__ == "StarsAmount"), None)
-    d["ask"] = amt if isinstance(amt, int) else None
     return d
+
+
+def _attr_ids(d: dict):
+    """Идентификаторы модели и фона для фильтра маркета (None, если схема Telethon старая)."""
+    M = getattr(tl, "StarGiftAttributeIdModel", None)
+    B = getattr(tl, "StarGiftAttributeIdBackdrop", None)
+    model = M(document_id=d["model_doc"]) if M and d.get("model_doc") else None
+    back = B(backdrop_id=d["backdrop_id"]) if B and d.get("backdrop_id") is not None else None
+    return model, back
 
 
 class Limiter:
@@ -104,9 +129,9 @@ class Monitor:
         self.on_gift = on_gift
         self.limiter = Limiter(config.RPS)
         self.state: dict[str, dict] = {}  # prefix -> {cursor, interval, next}
-        self._floor: dict[int, tuple[float, int | None]] = {}
-        self._last_refresh = 0.0
+        self._stats: dict[tuple, tuple[float, tuple]] = {}
         self._tasks: set[asyncio.Task] = set()
+        self._last_refresh = 0.0
 
     # ---------- low level ----------
     async def fetch(self, slug: str):
@@ -147,30 +172,54 @@ class Monitor:
                 hi = mid
         return lo
 
-    async def floor(self, gift_id: int | None) -> int | None:
-        """Ориентир цены: самый дешёвый лот коллекции на маркете Telegram (в Stars)."""
-        if not gift_id:
-            return None
-        cached = self._floor.get(gift_id)
+    # ---------- рынок ----------
+    async def stats(self, gift_id: int, attrs: list, key: str) -> tuple[int | None, int | None]:
+        """(самая низкая цена, число листингов) по маркету Telegram для коллекции с фильтром по признакам."""
+        ck = (gift_id, key)
+        cached = self._stats.get(ck)
         if cached and time.time() - cached[0] < 600:
             return cached[1]
-        val = None
+        price = count = None
         try:
             await self.limiter.wait()
+            kw = {"attributes": attrs} if attrs else {}
             r = await self.client(GetResaleStarGiftsRequest(
-                gift_id=gift_id, offset="", limit=1, sort_by_price=True))
+                gift_id=gift_id, offset="", limit=1, sort_by_price=True, **kw))
+            count = getattr(r, "count", None)
             if r.gifts:
-                amt = getattr(r.gifts[0], "resell_amount", None)
-                if isinstance(amt, list):
-                    amt = next((a.amount for a in amt if type(a).__name__ == "StarsAmount"), None)
-                if isinstance(amt, int):
-                    val = amt
+                price = stars_of(getattr(r.gifts[0], "resell_amount", None))
         except FATAL:
             raise
+        except FloodWaitError as e:
+            self.limiter.punish()
+            log.warning("FloodWait %ss on market stats", e.seconds)
         except Exception as e:  # схема TL меняется - не роняем мониторинг
-            log.debug("floor failed: %s", e)
-        self._floor[gift_id] = (time.time(), val)
-        return val
+            log.debug("market stats failed: %s", e)
+        res = (price, count)
+        self._stats[ck] = (time.time(), res)
+        return res
+
+    async def floor(self, gift_id: int | None) -> int | None:
+        """Флор коллекции (в Stars)."""
+        if not gift_id:
+            return None
+        return (await self.stats(gift_id, [], "all"))[0]
+
+    async def valuate(self, d: dict) -> None:
+        """Дописывает в подарок флор модели, фона и пары модель+фон (с числом листингов)."""
+        if d.get("valuated") or not d.get("gift_id"):
+            return
+        d["valuated"] = True
+        gid = d["gift_id"]
+        model, back = _attr_ids(d)
+        if model:
+            d["model_floor"], d["model_listed"] = await self.stats(gid, [model], f"m:{d['model_doc']}")
+        if back:
+            d["backdrop_floor"], d["backdrop_listed"] = await self.stats(
+                gid, [back], f"b:{d['backdrop_id']}")
+        if model and back:
+            d["combo_floor"], d["combo_listed"] = await self.stats(
+                gid, [model, back], f"mb:{d['model_doc']}:{d['backdrop_id']}")
 
     # ---------- collections ----------
     async def refresh_collections(self) -> None:

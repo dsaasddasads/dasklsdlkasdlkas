@@ -24,3 +24,7 @@ MAX_INTERVAL = float(os.getenv("MAX_INTERVAL", "120"))  # как редко пр
 PAID_MODE = os.getenv("PAID_MODE", "0") == "1"
 # дни -> цена в Telegram Stars (один тариф)
 PLANS = {7: int(os.getenv("PRICE_7D", "2000"))}
+
+# Оценка рынка и режим выгодных предложений
+PREMIUM_X = float(os.getenv("PREMIUM_X", "1.5"))   # во сколько раз модель/фон должны быть дороже флора коллекции
+MIN_LISTED = int(os.getenv("MIN_LISTED", "3"))     # мин. число листингов, чтобы флор считался надёжным

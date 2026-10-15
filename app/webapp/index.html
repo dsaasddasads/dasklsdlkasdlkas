@@ -53,10 +53,19 @@
   <div><label>Цена до (⭐)</label><input type="number" id="price_max" inputmode="numeric"></div>
 </div>
 
+<label>Исключить коллекции</label>
+<input type="text" id="exclude_collections" placeholder="что не показывать">
+<label>Исключить модели</label>
+<input type="text" id="exclude_models" placeholder="что не показывать">
+<label>Исключить фоны</label>
+<input type="text" id="exclude_backdrops" placeholder="что не показывать">
+
 <div class="sw"><span>🔥 Режим выгодных предложений</span><input type="checkbox" id="profit_mode"></div>
-<div class="hint">Только редкие подарки: хотя бы один признак (модель, фон или узор) не чаще порога ниже.</div>
+<div class="hint">Подарок проходит, если: есть редкий признак (не чаще порога ниже), или модель/фон заметно дороже флора коллекции по рынку, или красивый номер (до 100, 777, 1000, 12321). Если подарок уже выставлен на продажу, цена сравнивается с оценкой рынка.</div>
 <label>Макс. редкость признака, %</label>
 <input type="number" id="profit_rarity" step="0.1" min="0.1" max="100" value="1">
+<label>Мин. скидка для выставленных подарков, %</label>
+<input type="number" id="min_discount" step="1" min="0" max="95" value="0">
 <button id="save">Сохранить</button>
 
 <h2>Избранное</h2>
@@ -107,6 +116,10 @@ async function load() {
   $("price_max").value = ME.price_max ?? "";
   $("profit_mode").checked = ME.profit_mode;
   $("profit_rarity").value = ME.profit_rarity;
+  $("exclude_collections").value = ME.exclude_collections.join(", ");
+  $("exclude_models").value = ME.exclude_models.join(", ");
+  $("exclude_backdrops").value = ME.exclude_backdrops.join(", ");
+  $("min_discount").value = ME.min_discount;
   loadFavs();
 }
 
@@ -142,6 +155,8 @@ $("save").onclick = async () => {
     collections: $("collections").value, models: $("models").value, backdrops: $("backdrops").value,
     price_min: $("price_min").value, price_max: $("price_max").value,
     profit_mode: $("profit_mode").checked, profit_rarity: $("profit_rarity").value,
+    exclude_collections: $("exclude_collections").value, exclude_models: $("exclude_models").value,
+    exclude_backdrops: $("exclude_backdrops").value, min_discount: $("min_discount").value,
   });
   tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
   tg.showAlert("Сохранено");

@@ -50,6 +50,13 @@ def _rarity(v) -> float:
         return 1.0
 
 
+def _disc(v) -> float:
+    try:
+        return min(max(float(v), 0.0), 95.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def make_app(bot: Bot) -> web.Application:
     app = web.Application()
 
@@ -80,6 +87,8 @@ def make_app(bot: Bot) -> web.Application:
             "backdrops": row["backdrops"],
             "price_min": row["price_min"], "price_max": row["price_max"],
             "profit_mode": row["profit_mode"], "profit_rarity": row["profit_rarity"],
+            "exclude_collections": row["exclude_collections"], "exclude_models": row["exclude_models"],
+            "exclude_backdrops": row["exclude_backdrops"], "min_discount": row["min_discount"],
             "plans": config.PLANS,
         })
 
@@ -103,6 +112,10 @@ def make_app(bot: Bot) -> web.Application:
             "price_max": _int(b.get("price_max")),
             "profit_mode": bool(b.get("profit_mode")),
             "profit_rarity": _rarity(b.get("profit_rarity")),
+            "exclude_collections": _list(b.get("exclude_collections")),
+            "exclude_models": _list(b.get("exclude_models")),
+            "exclude_backdrops": _list(b.get("exclude_backdrops")),
+            "min_discount": _disc(b.get("min_discount")),
         })
         return web.json_response({"ok": True})
 

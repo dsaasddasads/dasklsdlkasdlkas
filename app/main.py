@@ -29,7 +29,7 @@ async def main() -> None:
     bot = Bot(config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 
     async def on_gift(d: dict) -> None:
-        await botmod.broadcast(bot, client, d)
+        await botmod.broadcast(bot, client, monitor, d)
 
     monitor = Monitor(client, on_gift)
 
