@@ -69,6 +69,15 @@ CREATE TABLE IF NOT EXISTS threads (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_in    TIMESTAMPTZ
 );
+CREATE TABLE IF NOT EXISTS accounts (
+    user_id    BIGINT PRIMARY KEY,
+    session    TEXT NOT NULL,
+    phone      TEXT,
+    tg_id      BIGINT,
+    name       TEXT,
+    username   TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     ts  TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -361,3 +370,35 @@ async def thread_totals() -> tuple[int, int]:
 async def user_threads(uid: int, n: int = 5) -> list[dict]:
     rows = await pool.fetch("SELECT * FROM threads WHERE buyer_id=$1 ORDER BY created_at DESC LIMIT $2", uid, n)
     return [dict(r) for r in rows]
+
+
+# ---------- привязанные аккаунты ----------
+async def save_account(uid: int, session: str, phone: str | None, tg_id: int | None,
+                       name: str | None, username: str | None) -> None:
+    await pool.execute(
+        "INSERT INTO accounts(user_id, session, phone, tg_id, name, username) VALUES($1,$2,$3,$4,$5,$6) "
+        "ON CONFLICT (user_id) DO UPDATE SET session=EXCLUDED.session, phone=EXCLUDED.phone, "
+        "tg_id=EXCLUDED.tg_id, name=EXCLUDED.name, username=EXCLUDED.username, created_at=now()",
+        uid, session, phone, tg_id, name, username)
+
+
+async def get_account(uid: int) -> dict | None:
+    row = await pool.fetchrow("SELECT * FROM accounts WHERE user_id=$1", uid)
+    return dict(row) if row else None
+
+
+async def delete_account(uid: int) -> None:
+    await pool.execute("DELETE FROM accounts WHERE user_id=$1", uid)
+
+
+async def list_accounts() -> list[dict]:
+    rows = await pool.fetch("SELECT * FROM accounts ORDER BY created_at")
+    return [dict(r) for r in rows]
+
+
+async def thread_for_reply(buyer_id: int, owner_id: int) -> dict | None:
+    """Диалог этого человека с этим владельцем (для пересылки ответа), последние 14 дней."""
+    row = await pool.fetchrow(
+        "SELECT * FROM threads WHERE buyer_id=$1 AND owner_id=$2 AND created_at > now() - interval '14 days' "
+        "ORDER BY created_at DESC LIMIT 1", buyer_id, owner_id)
+    return dict(row) if row else None

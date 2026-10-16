@@ -28,6 +28,7 @@ WELCOME = (
     "— гибкие фильтры: коллекции, модели, фоны, цены и исключения\n"
     "— режим выгодных предложений: редкость, премия к рынку, красивые номера\n"
     "— избранное: сохраняй подарки одной кнопкой\n"
+    "— сообщения владельцам с твоего аккаунта (привязка в приложении)\n"
     "— старт и стоп работы в любой момент\n\n"
     "Управление — кнопками меню внизу или в приложении."
 )
@@ -98,7 +99,8 @@ async def status_text(uid: int) -> str:
         until = ""
         if config.PAID_MODE and u and db.sub_active(u):
             until = f" Подписка до {u['sub_until']:%d.%m.%Y %H:%M} UTC."
-        return f"✅ Доступ открыт. Бот {state}. Режим выгодных: {mode}.{until}"
+        acc = "привязан" if await db.get_account(uid) else "не привязан"
+        return f"✅ Доступ открыт. Бот {state}. Режим выгодных: {mode}. Аккаунт: {acc}.{until}"
     if config.PAID_MODE:
         return "Подписки нет. Оформи её в приложении."
     return "🔒 Приватный бот. Доступа нет."
@@ -114,9 +116,13 @@ async def _gate(m: Message) -> tuple[dict | None, bool]:
 
 
 @router.message(Command("status"))
+@router.message(Command("menu"))
 @router.message(F.text == TXT_STATUS)
 async def status(m: Message):
-    await m.answer(await status_text(m.from_user.id))
+    # заодно обновляем кнопки меню внизу чата (появляются новые кнопки после обновлений)
+    u = await db.get_user(m.from_user.id)
+    await m.answer(await status_text(m.from_user.id),
+                   reply_markup=menu_kb(u, db.has_access(m.from_user.id, u)))
 
 
 @router.message(F.text.in_({TXT_START, TXT_STOP}))
@@ -497,7 +503,7 @@ async def broadcast(bot: Bot, client: TelegramClient, monitor, d: dict) -> None:
             sent += 1
             await db.log_event(u["user_id"], "notify", d["slug"])
             if u.get("auto_state") == "on" and db.auto_allowed(u) and d.get("owner_id"):
-                relay.schedule_auto(bot, client, monitor, u, d)
+                relay.schedule_auto(bot, monitor, u, d)
         except Exception as e:
             log.debug("send to %s failed: %s", u["user_id"], e)
         await asyncio.sleep(0.04)
@@ -509,6 +515,7 @@ async def setup_commands(bot: Bot) -> None:
     user_cmds = [
         BotCommand(command="start", description="Меню и список функций"),
         BotCommand(command="status", description="Статус работы"),
+        BotCommand(command="menu", description="Обновить кнопки меню"),
     ]
     admin_cmds = user_cmds + [
         BotCommand(command="users", description="Список людей"),

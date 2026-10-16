@@ -4,140 +4,243 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Gift Track</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-  :root { --bg:#0e0e10; --card:#1a1a1e; --gold:#e5c44a; --text:#fff; --muted:#8d8d96; }
-  * { box-sizing:border-box; }
-  body { margin:0; padding:12px 16px 40px; background:var(--bg); color:var(--text);
-         font-family:-apple-system,"Segoe UI",Roboto,sans-serif; }
-  h2 { font-size:12px; letter-spacing:.08em; color:var(--muted); margin:22px 0 10px; text-transform:uppercase; }
-  .card { display:flex; gap:14px; align-items:center; background:var(--card); border-radius:16px; padding:14px; margin-bottom:10px; }
-  .ico { width:44px; height:44px; border-radius:50%; flex:none; display:grid; place-items:center;
-         background:radial-gradient(circle at 30% 30%, #f3dd7a, #b8941f); font-size:20px; }
-  .card b { display:block; font-size:16px; } .card span { color:var(--muted); font-size:13px; }
-  label { display:block; font-size:13px; color:var(--muted); margin:12px 0 6px; }
-  input[type=text], input[type=number] { width:100%; padding:12px; border-radius:12px; border:1px solid #2b2b31;
-         background:var(--card); color:var(--text); font-size:15px; }
-  .row { display:flex; gap:10px; } .row > div { flex:1; }
-  button { width:100%; margin-top:14px; padding:14px; border:0; border-radius:14px; font-size:16px; font-weight:600;
-           background:linear-gradient(135deg,#f3dd7a,#c9a227); color:#1a1400; }
-  button:disabled { opacity:.4; }
-  button.alt { background:var(--card); color:var(--gold); border:1px solid #3a3320; }
-  button.stop { background:#3a1618; color:#ff8a8a; border:1px solid #6b2a2e; }
-  button.mini { width:auto; margin:0; padding:8px 12px; font-size:13px; }
-  .tabs { display:flex; gap:6px; background:var(--card); padding:4px; border-radius:14px; margin-bottom:14px;
-          position:sticky; top:0; z-index:5; }
-  .tabs button.tab { flex:1; margin:0; padding:10px 6px; font-size:14px; background:transparent; color:var(--muted); border-radius:10px; }
-  .tabs button.tab.active { background:linear-gradient(135deg,#f3dd7a,#c9a227); color:#1a1400; }
-  section { display:none; } section.active { display:block; }
+  :root { --fg:#ededed; --muted:#7d7d7d; --line:#1f1f1f; --line2:#2e2e2e; --bad:#ff6b6b; --good:#7ddc9a; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html { background:#000; }
+  body { margin:0; color:var(--fg); background:transparent;
+         font-family:"Inter",-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;
+         font-weight:300; font-size:15px; line-height:1.5; letter-spacing:.01em; }
+  #dots { position:fixed; inset:0; width:100%; height:100%; z-index:0; pointer-events:none; }
+  .wrap { position:relative; z-index:1; max-width:560px; margin:0 auto; padding:0 18px 70px; }
+
+  .tabs { display:flex; gap:2px; overflow-x:auto; scrollbar-width:none; margin:0 -18px 6px; padding:0 18px;
+          border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5;
+          background:rgba(0,0,0,.82); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); }
+  .tabs::-webkit-scrollbar { display:none; }
+  button.tab { flex:none; width:auto; margin:0; padding:14px 11px; font-size:13px; font-weight:400; letter-spacing:.04em;
+               background:transparent; color:var(--muted); border:0; border-bottom:1px solid transparent; border-radius:0; }
+  button.tab.active { color:#fff; border-bottom-color:#fff; }
+
+  h2 { font-size:11px; font-weight:400; letter-spacing:.2em; text-transform:uppercase; color:var(--muted); margin:32px 0 12px; }
+  .card { border:1px solid var(--line); border-radius:14px; padding:14px 16px; margin-bottom:10px; background:rgba(0,0,0,.55); }
+  .card b { display:block; font-weight:400; font-size:15px; }
+  .card span, .muted { color:var(--muted); font-size:13px; }
+  .row { display:flex; gap:10px; } .row > div { flex:1; } .row > button { flex:1; }
+  .line { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+  .status { font-size:14px; padding:14px 16px; border:1px solid var(--line); border-radius:14px; background:rgba(0,0,0,.55); }
+  .on { color:var(--good); } .off { color:var(--bad); }
+  .hint { font-size:12px; color:var(--muted); margin-top:8px; line-height:1.55; }
+  .note { font-size:12.5px; color:#b5b5b5; border-left:1px solid var(--line2); padding:2px 0 2px 12px; margin:14px 0; line-height:1.6; }
+
+  label { display:block; font-size:12px; color:var(--muted); margin:16px 0 6px; letter-spacing:.04em; }
+  label.check { display:flex; gap:10px; align-items:flex-start; color:#cfcfcf; font-size:13px; letter-spacing:0; }
+  input[type=text], input[type=number], input[type=tel], input[type=password], select, textarea {
+    width:100%; padding:13px 14px; border-radius:12px; border:1px solid var(--line2); background:rgba(0,0,0,.6);
+    color:#fff; font-size:15px; font-weight:300; font-family:inherit; }
+  input:focus, select:focus, textarea:focus { outline:none; border-color:#8a8a8a; }
+  input[type=checkbox] { width:auto; accent-color:#fff; margin-top:3px; }
+  input::placeholder, textarea::placeholder { color:#555; }
+  input[type=number]::-webkit-inner-spin-button { display:none; }
+
+  button { width:100%; margin-top:14px; padding:14px; border:0; border-radius:12px; font-size:15px; font-weight:500;
+           font-family:inherit; letter-spacing:.02em; background:#fff; color:#000; }
+  button:active { opacity:.8; }
+  button:disabled { opacity:.3; }
+  button.alt { background:transparent; color:#fff; border:1px solid var(--line2); font-weight:400; }
+  button.stop { background:transparent; color:var(--bad); border:1px solid #3d1c1c; font-weight:400; }
+  button.mini { width:auto; margin:0; padding:8px 13px; font-size:13px; }
   .presets { display:flex; gap:8px; flex-wrap:wrap; }
-  .presets button { flex:1; min-width:30%; margin:0; padding:10px 8px; font-size:13px; }
-  .status { padding:12px 14px; border-radius:14px; background:var(--card); font-size:14px; }
-  .on { color:#6fdc8c; } .off { color:#ff7b7b; }
-  .sw { display:flex; justify-content:space-between; align-items:center; margin-top:14px; }
-  .hint { font-size:12px; color:var(--muted); margin-top:6px; }
-  select, textarea { width:100%; padding:12px; border-radius:12px; border:1px solid #2b2b31;
-         background:var(--card); color:var(--text); font-size:15px; font-family:inherit; }
-  .row button { flex:1; }
+  .presets button { flex:1; min-width:30%; margin:0; padding:11px 8px; font-size:13px; }
+
+  section { display:none; } section.active { display:block; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .stat { border:1px solid var(--line); border-radius:14px; padding:12px 14px; background:rgba(0,0,0,.55); }
+  .stat span { display:block; color:var(--muted); font-size:11px; letter-spacing:.12em; text-transform:uppercase; }
+  .stat b { display:block; font-weight:300; font-size:20px; margin-top:4px; }
+  .urow { cursor:pointer; }
+  .tbl { width:100%; border-collapse:collapse; font-size:13px; margin-top:8px; }
+  .tbl td { padding:6px 0; border-bottom:1px solid var(--line); } .tbl td:not(:first-child) { text-align:right; color:#cfcfcf; }
 </style>
 </head>
 <body>
-<div class="tabs">
-  <button class="tab active" data-tab="home">Главная</button>
-  <button class="tab" data-tab="filters">Фильтры</button>
-  <button class="tab" data-tab="auto" id="tab-auto-btn" style="display:none">🤖 Авто</button>
-  <button class="tab" data-tab="favs">⭐ Избранное</button>
+<canvas id="dots"></canvas>
+<div class="wrap">
+  <div class="tabs">
+    <button class="tab active" data-tab="home">Главная</button>
+    <button class="tab" data-tab="filters">Фильтры</button>
+    <button class="tab" data-tab="account">Аккаунт</button>
+    <button class="tab" data-tab="auto" id="tab-auto-btn" style="display:none">Авто</button>
+    <button class="tab" data-tab="favs">Избранное</button>
+    <button class="tab" data-tab="admin" id="tab-admin-btn" style="display:none">Админ</button>
+  </div>
+
+  <!-- ГЛАВНАЯ -->
+  <section id="tab-home" class="active">
+    <div style="height:14px"></div>
+    <div class="status" id="state">Загрузка…</div>
+    <button id="toggle" disabled>…</button>
+
+    <h2>Аккаунт</h2>
+    <div class="status" id="home_acc">…</div>
+
+    <div id="subbox">
+      <h2>Подписка</h2>
+      <div class="status" id="status"></div>
+      <div id="plans"></div>
+    </div>
+
+    <h2>Возможности</h2>
+    <div class="card"><b>Мгновенные уведомления</b><span>Сразу после каждого улучшения</span></div>
+    <div class="card"><b>Оценка рынка</b><span>Флор коллекции, модели, фона и пары</span></div>
+    <div class="card"><b>Сообщения владельцам</b><span>С твоего аккаунта, ответы приходят в бота</span></div>
+    <div class="card"><b>Выгодные предложения</b><span>Редкость, премия к рынку, красивые номера</span></div>
+  </section>
+
+  <!-- ФИЛЬТРЫ -->
+  <section id="tab-filters">
+    <h2>Быстрые настройки</h2>
+    <div class="presets">
+      <button class="alt" data-preset="profit">Выгодные</button>
+      <button class="alt" data-preset="rare">Только редкие</button>
+      <button class="alt" data-preset="reset">Сбросить</button>
+    </div>
+    <div class="hint">Быстрая настройка заполняет поля — потом нажми «Сохранить».</div>
+
+    <h2>Что показывать</h2>
+    <label>Коллекции (через запятую, пусто = все)</label>
+    <input type="text" id="collections" placeholder="Plush Pepe, Heart Locket">
+    <label>Модели</label>
+    <input type="text" id="models" placeholder="часть названия">
+    <label>Фоны</label>
+    <input type="text" id="backdrops" placeholder="Black, Onyx Black">
+    <div class="row">
+      <div><label>Цена от, ⭐</label><input type="number" id="price_min" inputmode="numeric"></div>
+      <div><label>Цена до, ⭐</label><input type="number" id="price_max" inputmode="numeric"></div>
+    </div>
+
+    <h2>Исключить</h2>
+    <label>Коллекции</label>
+    <input type="text" id="exclude_collections" placeholder="что не показывать">
+    <label>Модели</label>
+    <input type="text" id="exclude_models" placeholder="что не показывать">
+    <label>Фоны</label>
+    <input type="text" id="exclude_backdrops" placeholder="что не показывать">
+
+    <h2>Выгодные предложения</h2>
+    <div class="line"><span>Включить режим</span><input type="checkbox" id="profit_mode"></div>
+    <div class="hint">Подарок проходит, если есть редкий признак (не чаще порога ниже), или модель/фон заметно дороже флора коллекции по рынку, или красивый номер (до 100, 777, 1000, 12321). Если подарок уже выставлен на продажу, цена сравнивается с оценкой рынка.</div>
+    <label>Макс. редкость признака, %</label>
+    <input type="number" id="profit_rarity" step="0.1" min="0.1" max="100" value="1">
+    <label>Мин. скидка для выставленных подарков, %</label>
+    <input type="number" id="min_discount" step="1" min="0" max="95" value="0">
+    <button id="save">Сохранить</button>
+  </section>
+
+  <!-- АККАУНТ -->
+  <section id="tab-account">
+    <div style="height:14px"></div>
+    <div id="acc_linked" style="display:none">
+      <div class="card"><b id="acc_name"></b><span id="acc_meta"></span></div>
+      <div class="hint">Сообщения владельцам уходят с этого аккаунта. Ответы владельцев приходят в чат с ботом.</div>
+      <button class="stop" id="acc_unlink">Отвязать аккаунт</button>
+      <div class="hint">При отвязке сессия завершается на стороне Telegram.</div>
+    </div>
+
+    <div id="acc_form">
+      <div class="hint" style="font-size:14px; color:#cfcfcf">Привяжи свой аккаунт Telegram: с него бот будет писать владельцам подарков, а ответы придут сюда.</div>
+      <div class="note">
+        Бот получит доступ к аккаунту: сможет отправлять сообщения и читать ответы владельцев, с которыми ты начал диалог. Другие твои чаты бот не пересылает. Сессия хранится в зашифрованном виде, но администратор бота имеет доступ к серверу — привязывай аккаунт, только если доверяешь ему. Лучше использовать отдельный аккаунт. Отвязать можно в любой момент здесь или в Telegram: Настройки → Устройства.
+      </div>
+      <label class="check"><input type="checkbox" id="acc_consent"><span>Я понимаю это и согласен</span></label>
+
+      <div id="acc_step_phone">
+        <label>Номер телефона</label>
+        <input type="tel" id="acc_phone" placeholder="+380..." autocomplete="tel">
+        <button id="acc_send" disabled>Получить код</button>
+      </div>
+      <div id="acc_step_code" style="display:none">
+        <label>Код из Telegram</label>
+        <input type="text" id="acc_code" inputmode="numeric" placeholder="12345" autocomplete="one-time-code">
+        <button id="acc_login">Войти</button>
+        <button class="alt" id="acc_back">Другой номер</button>
+        <div class="hint">Код придёт в приложение Telegram на этом аккаунте (чат «Telegram»).</div>
+      </div>
+      <div id="acc_step_pw" style="display:none">
+        <label>Пароль двухэтапной проверки</label>
+        <input type="password" id="acc_pw" autocomplete="current-password">
+        <button id="acc_pwbtn">Подтвердить</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- АВТО -->
+  <section id="tab-auto">
+    <div style="height:14px"></div>
+    <div class="status" id="auto_status">…</div>
+    <div class="row" id="auto_ctl"></div>
+
+    <h2>Настройки</h2>
+    <label>Сколько сообщений за один запуск</label>
+    <input type="number" id="auto_limit" min="1" max="5" value="5">
+    <label>Пауза между сообщениями, сек</label>
+    <input type="number" id="auto_gap" min="30" max="600" value="60">
+    <label>Текст сообщения</label>
+    <select id="auto_tpl"></select>
+    <textarea id="auto_text" rows="4" maxlength="500" style="display:none; margin-top:8px"
+              placeholder="Свой текст. Можно использовать {collection} и {num}"></textarea>
+    <div class="hint">Авто пишет только владельцам подарков, которые подошли под твои фильтры, с твоего привязанного аккаунта. Одному владельцу — не чаще раза в 72 часа. После лимита режим сам выключается.</div>
+    <button id="auto_save">Сохранить настройки</button>
+  </section>
+
+  <!-- ИЗБРАННОЕ -->
+  <section id="tab-favs">
+    <div style="height:14px"></div>
+    <div id="favs"></div>
+  </section>
+
+  <!-- АДМИН -->
+  <section id="tab-admin">
+    <div style="height:14px"></div>
+    <button class="alt" id="admin_refresh" style="margin-top:0">Обновить</button>
+    <h2>Итоги · 24 ч / 7 дн</h2>
+    <div class="grid" id="admin_totals"></div>
+    <h2>Люди</h2>
+    <div id="admin_users"></div>
+    <div id="admin_detail"></div>
+  </section>
 </div>
-
-<section id="tab-home" class="active">
-  <div class="status" id="state">Загрузка…</div>
-  <button id="toggle" disabled>…</button>
-
-  <div id="subbox">
-    <h2>Подписка</h2>
-    <div class="status" id="status"></div>
-    <div id="plans"></div>
-  </div>
-
-  <h2>Возможности</h2>
-  <div class="card"><div class="ico">⚡</div><div><b>Мгновенные уведомления</b><span>Сразу после каждого улучшения</span></div></div>
-  <div class="card"><div class="ico">📊</div><div><b>Оценка рынка</b><span>Флор коллекции, модели, фона и пары</span></div></div>
-  <div class="card"><div class="ico">🔍</div><div><b>Поиск владельца</b><span>Ссылка на владельца подарка</span></div></div>
-  <div class="card"><div class="ico">🔥</div><div><b>Выгодные предложения</b><span>Редкость, премия к рынку, красивые номера</span></div></div>
-</section>
-
-<section id="tab-filters">
-  <h2>Быстрые настройки</h2>
-  <div class="presets">
-    <button class="alt" data-preset="profit">🔥 Выгодные</button>
-    <button class="alt" data-preset="rare">💎 Только редкие</button>
-    <button class="alt" data-preset="reset">🧹 Сбросить</button>
-  </div>
-  <div class="hint">Быстрая настройка заполняет поля — потом нажми «Сохранить».</div>
-
-  <h2>Что показывать</h2>
-  <label>Коллекции (через запятую, пусто = все)</label>
-  <input type="text" id="collections" placeholder="Plush Pepe, Heart Locket">
-  <label>Модели</label>
-  <input type="text" id="models" placeholder="часть названия">
-  <label>Фоны</label>
-  <input type="text" id="backdrops" placeholder="Black, Onyx Black">
-  <div class="row">
-    <div><label>Цена от (⭐)</label><input type="number" id="price_min" inputmode="numeric"></div>
-    <div><label>Цена до (⭐)</label><input type="number" id="price_max" inputmode="numeric"></div>
-  </div>
-
-  <h2>Исключить</h2>
-  <label>Коллекции</label>
-  <input type="text" id="exclude_collections" placeholder="что не показывать">
-  <label>Модели</label>
-  <input type="text" id="exclude_models" placeholder="что не показывать">
-  <label>Фоны</label>
-  <input type="text" id="exclude_backdrops" placeholder="что не показывать">
-
-  <h2>Режим выгодных предложений</h2>
-  <div class="sw"><span>🔥 Включить</span><input type="checkbox" id="profit_mode"></div>
-  <div class="hint">Подарок проходит, если: есть редкий признак (не чаще порога ниже), или модель/фон заметно дороже флора коллекции по рынку, или красивый номер (до 100, 777, 1000, 12321). Если подарок уже выставлен на продажу, цена сравнивается с оценкой рынка.</div>
-  <label>Макс. редкость признака, %</label>
-  <input type="number" id="profit_rarity" step="0.1" min="0.1" max="100" value="1">
-  <label>Мин. скидка для выставленных подарков, %</label>
-  <input type="number" id="min_discount" step="1" min="0" max="95" value="0">
-  <button id="save">Сохранить</button>
-</section>
-
-<section id="tab-auto">
-  <div class="status" id="auto_status">…</div>
-  <div class="row" id="auto_ctl"></div>
-
-  <h2>Настройки</h2>
-  <label>Сколько сообщений за один запуск</label>
-  <input type="number" id="auto_limit" min="1" max="5" value="5">
-  <label>Пауза между сообщениями, сек</label>
-  <input type="number" id="auto_gap" min="30" max="600" value="60">
-  <label>Текст сообщения</label>
-  <select id="auto_tpl"></select>
-  <textarea id="auto_text" rows="4" maxlength="500" style="display:none; margin-top:8px"
-            placeholder="Свой текст. Можно использовать {collection} и {num}"></textarea>
-  <div class="hint">Авто пишет только владельцам подарков, которые подошли под твои фильтры. Одному владельцу — не чаще раза в 72 часа. После лимита режим сам выключается. Ответы владельцев приходят в чат с ботом.</div>
-  <button id="auto_save">Сохранить настройки</button>
-</section>
-
-<section id="tab-favs">
-  <div id="favs"></div>
-</section>
 
 <script>
 const tg = window.Telegram.WebApp; tg.ready(); tg.expand();
+try { tg.setBackgroundColor("#000000"); tg.setHeaderColor("#000000"); } catch (e) {}
 const H = { "Content-Type":"application/json", "X-Init-Data": tg.initData };
 const $ = id => document.getElementById(id);
 const FIELDS = ["collections","models","backdrops","exclude_collections","exclude_models","exclude_backdrops"];
-let ME = null;
+let ME = null, accStep = "phone";
 
 async function api(path, body) {
-  const r = await fetch(path, body ? { method:"POST", headers:H, body:JSON.stringify(body) } : { headers:H });
-  if (!r.ok) throw new Error(r.status);
-  return r.json();
+  const r = await fetch(path, body !== undefined ? { method:"POST", headers:H, body:JSON.stringify(body) } : { headers:H });
+  let data = null; try { data = await r.json(); } catch (e) {}
+  if (!r.ok) { const err = new Error((data && data.error) || String(r.status)); err.status = r.status; throw err; }
+  return data;
 }
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+const ago = s => s == null ? "—" : s < 60 ? s + " с" : s < 3600 ? Math.floor(s / 60) + " мин" : s < 86400 ? Math.floor(s / 3600) + " ч" : Math.floor(s / 86400) + " дн";
+const fail = e => tg.showAlert(e.message || "Ошибка");
+
+function showTab(name) {
+  document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x.dataset.tab === name));
+  document.querySelectorAll("section").forEach(s => s.classList.toggle("active", s.id === "tab-" + name));
+  if (name === "favs") loadFavs();
+  if (name === "admin") loadAdmin();
+  window.scrollTo(0, 0);
+}
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => showTab(t.dataset.tab));
 
 function fillForm() {
   FIELDS.forEach(f => $(f).value = ME[f].join(", "));
@@ -151,80 +254,104 @@ function fillForm() {
 async function load(fill = true) {
   ME = await api("/api/me");
   $("subbox").style.display = ME.paid_mode ? "" : "none";
-  $("status").innerHTML = ME.active
-    ? (ME.sub_until ? '<span class="on">● Подписка активна</span> до ' + new Date(ME.sub_until).toLocaleString()
-                    : '<span class="on">● Доступ открыт</span>')
-    : '<span class="off">● Подписки нет</span> — оформи, чтобы получать уведомления';
-  $("state").innerHTML = ME.enabled
-    ? '<span class="on">● Работа идёт</span> — уведомления включены'
-    : '<span class="off">● Остановлено</span> — уведомления выключены';
+  $("tab-admin-btn").style.display = ME.is_admin ? "" : "none";
+  $("status").innerHTML = "";
+  const s = el("span", ME.active ? "on" : "off", ME.active ? (ME.sub_until ? "Подписка активна" : "Доступ открыт") : "Подписки нет");
+  $("status").append(s, document.createTextNode(ME.active && ME.sub_until ? " до " + new Date(ME.sub_until).toLocaleString()
+    : ME.active ? "" : " — оформи, чтобы получать уведомления"));
+  $("state").innerHTML = "";
+  $("state").append(el("span", ME.enabled ? "on" : "off", ME.enabled ? "Работа идёт" : "Остановлено"),
+    document.createTextNode(ME.enabled ? " — уведомления включены" : " — уведомления выключены"));
   const t = $("toggle");
-  t.textContent = ME.enabled ? "⏹ Завершить работу" : "▶ Начать работу";
+  t.textContent = ME.enabled ? "Завершить работу" : "Начать работу";
   t.className = ME.enabled ? "stop" : "";
   t.disabled = !ME.active;
 
   $("plans").innerHTML = "";
   Object.entries(ME.plans).forEach(([days, price]) => {
-    const b = document.createElement("button"); b.className = "alt";
-    b.textContent = days + " дн. — " + price + " ⭐";
+    const b = el("button", "alt", days + " дн. — " + price + " ⭐");
     b.onclick = async () => {
-      const { link } = await api("/api/invoice", { days: +days });
-      tg.openInvoice(link, s => { if (s === "paid") load(false); });
+      try { const { link } = await api("/api/invoice", { days: +days }); tg.openInvoice(link, st => { if (st === "paid") load(false); }); }
+      catch (e) { fail(e); }
     };
     $("plans").appendChild(b);
   });
+  renderAccount();
   renderAuto(fill);
   if (fill) fillForm();
 }
 
-async function loadFavs() {
-  const { items } = await api("/api/favorites");
-  const box = $("favs"); box.innerHTML = "";
-  if (!items.length) {
-    box.innerHTML = '<div class="status">Пока пусто. Жми «⭐ В избранное» под уведомлением.</div>';
-    return;
-  }
-  items.forEach(it => {
-    const row = document.createElement("div"); row.className = "card";
-    const info = document.createElement("div"); info.style.flex = "1";
-    const b = document.createElement("b"); b.textContent = it.collection + " #" + it.num;
-    const s = document.createElement("span"); s.textContent = [it.model, it.backdrop].filter(Boolean).join(" · ");
-    info.append(b, s);
-    const open = document.createElement("button"); open.className = "mini"; open.textContent = "Открыть";
-    open.onclick = () => tg.openTelegramLink("https://t.me/nft/" + it.slug);
-    const del = document.createElement("button"); del.className = "mini alt"; del.textContent = "✕";
-    del.onclick = async () => { await api("/api/favorites/remove", { slug: it.slug }); loadFavs(); };
-    row.append(info, open, del);
-    box.appendChild(row);
-  });
+// ---------- аккаунт ----------
+function setStep(step) {
+  accStep = step;
+  $("acc_step_phone").style.display = step === "phone" ? "" : "none";
+  $("acc_step_code").style.display = step === "code" ? "" : "none";
+  $("acc_step_pw").style.display = step === "password" ? "" : "none";
 }
+function renderAccount() {
+  const a = ME.account || { linked: false };
+  $("acc_linked").style.display = a.linked ? "" : "none";
+  $("acc_form").style.display = a.linked ? "none" : "";
+  const home = $("home_acc"); home.innerHTML = "";
+  if (a.linked) {
+    $("acc_name").textContent = a.name || "Аккаунт";
+    $("acc_meta").textContent = [a.username ? "@" + a.username : "", a.phone].filter(Boolean).join(" · ") + (a.connected ? "" : " · нет связи");
+    home.append(el("span", "on", "Привязан"), document.createTextNode(" — " + (a.username ? "@" + a.username : a.name || "")));
+  } else {
+    home.append(el("span", "off", "Не привязан"), document.createTextNode(" — без аккаунта сообщения не отправляются "));
+    const b = el("button", "alt mini", "Привязать"); b.style.marginTop = "10px"; b.onclick = () => showTab("account");
+    home.append(document.createElement("br"), b);
+  }
+}
+$("acc_consent").onchange = () => { $("acc_send").disabled = !$("acc_consent").checked; };
+$("acc_send").onclick = async () => {
+  try { await api("/api/account/phone", { phone: $("acc_phone").value }); setStep("code"); $("acc_code").value = ""; }
+  catch (e) { fail(e); }
+};
+$("acc_login").onclick = async () => {
+  try {
+    const r = await api("/api/account/code", { code: $("acc_code").value });
+    if (r.step === "password") setStep("password"); else { setStep("phone"); await load(false); tg.showAlert("Аккаунт привязан"); }
+  } catch (e) { fail(e); }
+};
+$("acc_pwbtn").onclick = async () => {
+  try { await api("/api/account/password", { password: $("acc_pw").value }); $("acc_pw").value = ""; setStep("phone"); await load(false); tg.showAlert("Аккаунт привязан"); }
+  catch (e) { fail(e); }
+};
+$("acc_back").onclick = () => setStep("phone");
+$("acc_unlink").onclick = () => {
+  tg.showConfirm("Отвязать аккаунт? Сессия будет завершена, авто-режим остановится.", async ok => {
+    if (!ok) return;
+    try { await api("/api/account/unlink", {}); await load(false); } catch (e) { fail(e); }
+  });
+};
 
-// авто-режим
+// ---------- авто ----------
 function renderAuto(fill) {
   $("tab-auto-btn").style.display = ME.auto_available ? "" : "none";
   if (!ME.auto_available) return;
   const names = { off: "выключен", on: "работает", paused: "на паузе" };
-  $("auto_status").innerHTML = "🤖 Авто-режим: <b>" + names[ME.auto_state] + "</b> · отправлено " +
-    ME.auto_sent + " из " + ME.auto_limit +
-    (ME.enabled ? "" : '<br><span class="off">Работа остановлена — нажми «Начать работу» на главной</span>');
+  const st = $("auto_status"); st.innerHTML = "";
+  st.append(document.createTextNode("Авто-режим: "), el("b", "", names[ME.auto_state]),
+    document.createTextNode(" · отправлено " + ME.auto_sent + " из " + ME.auto_limit));
+  if (!ME.account || !ME.account.linked) { st.append(document.createElement("br"), el("span", "off", "Сначала привяжи аккаунт (вкладка «Аккаунт»)")); }
+  else if (!ME.enabled) { st.append(document.createElement("br"), el("span", "off", "Работа остановлена — нажми «Начать работу» на главной")); }
   const ctl = $("auto_ctl"); ctl.innerHTML = "";
   const mk = (text, action, cls) => {
-    const b = document.createElement("button"); b.textContent = text; if (cls) b.className = cls;
-    b.onclick = async () => { await api("/api/auto", { action }); load(false); };
+    const b = el("button", cls || "", text);
+    b.onclick = async () => { try { await api("/api/auto", { action }); load(false); } catch (e) { fail(e); } };
     ctl.appendChild(b);
   };
-  if (ME.auto_state === "on") { mk("⏸ Пауза", "pause", "alt"); mk("⏹ Стоп", "stop", "stop"); }
-  else if (ME.auto_state === "paused") { mk("▶ Продолжить", "resume"); mk("⏹ Стоп", "stop", "stop"); }
-  else mk("▶ Запустить на " + ME.auto_limit, "start");
+  if (ME.auto_state === "on") { mk("Пауза", "pause", "alt"); mk("Стоп", "stop", "stop"); }
+  else if (ME.auto_state === "paused") { mk("Продолжить", "resume"); mk("Стоп", "stop", "stop"); }
+  else mk("Запустить на " + ME.auto_limit, "start");
   if (fill) {
     $("auto_limit").max = ME.auto_max;
     $("auto_gap").min = ME.auto_min_gap; $("auto_gap").max = ME.auto_max_gap;
     $("auto_limit").value = ME.auto_limit; $("auto_gap").value = ME.auto_gap;
     const sel = $("auto_tpl"); sel.innerHTML = "";
-    ME.templates.forEach((t, i) => {
-      const o = document.createElement("option"); o.value = i; o.textContent = "Шаблон " + (i + 1) + ": " + t; sel.appendChild(o);
-    });
-    const c = document.createElement("option"); c.value = "custom"; c.textContent = "✍️ Свой текст"; sel.appendChild(c);
+    ME.templates.forEach((tx, i) => { const o = el("option", "", "Шаблон " + (i + 1) + ": " + tx); o.value = i; sel.appendChild(o); });
+    const c = el("option", "", "Свой текст"); c.value = "custom"; sel.appendChild(c);
     sel.value = ME.auto_text ? "custom" : String(Math.min(ME.auto_tpl, ME.templates.length - 1));
     $("auto_text").value = ME.auto_text;
     $("auto_text").style.display = sel.value === "custom" ? "" : "none";
@@ -233,23 +360,93 @@ function renderAuto(fill) {
 $("auto_tpl").onchange = () => { $("auto_text").style.display = $("auto_tpl").value === "custom" ? "" : "none"; };
 $("auto_save").onclick = async () => {
   const custom = $("auto_tpl").value === "custom";
-  await api("/api/auto/settings", {
-    limit: $("auto_limit").value, gap: $("auto_gap").value,
-    tpl: custom ? ME.auto_tpl : $("auto_tpl").value, text: custom ? $("auto_text").value : "",
-  });
-  tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
-  tg.showAlert("Сохранено");
-  load();
+  try {
+    await api("/api/auto/settings", { limit: $("auto_limit").value, gap: $("auto_gap").value,
+      tpl: custom ? ME.auto_tpl : $("auto_tpl").value, text: custom ? $("auto_text").value : "" });
+    tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+    tg.showAlert("Сохранено"); load();
+  } catch (e) { fail(e); }
 };
 
-// вкладки
-document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
-  document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x === t));
-  document.querySelectorAll("section").forEach(s => s.classList.toggle("active", s.id === "tab-" + t.dataset.tab));
-  if (t.dataset.tab === "favs") loadFavs();
-});
+// ---------- избранное ----------
+async function loadFavs() {
+  const { items } = await api("/api/favorites");
+  const box = $("favs"); box.innerHTML = "";
+  if (!items.length) { box.append(el("div", "status", "Пока пусто. Жми «⭐ В избранное» под уведомлением.")); return; }
+  items.forEach(it => {
+    const row = el("div", "card line");
+    const info = el("div"); info.style.flex = "1";
+    info.append(el("b", "", it.collection + " #" + it.num), el("span", "", [it.model, it.backdrop].filter(Boolean).join(" · ")));
+    const open = el("button", "mini", "Открыть"); open.onclick = () => tg.openTelegramLink("https://t.me/nft/" + it.slug);
+    const del = el("button", "mini alt", "✕");
+    del.onclick = async () => { await api("/api/favorites/remove", { slug: it.slug }); loadFavs(); };
+    row.append(info, open, del); box.appendChild(row);
+  });
+}
 
-// быстрые настройки (только заполняют поля)
+// ---------- админ ----------
+async function loadAdmin() {
+  if (!ME || !ME.is_admin) return;
+  try {
+    const d = await api("/api/admin/stats");
+    const g = $("admin_totals"); g.innerHTML = "";
+    const stat = (label, value) => { const s = el("div", "stat"); s.append(el("span", "", label), el("b", "", value)); g.appendChild(s); };
+    stat("Подарков", d.gifts[0] + " / " + d.gifts[1]);
+    stat("Уведомлений", d.notify[0] + " / " + d.notify[1]);
+    stat("Сообщений", d.msgs[0] + " / " + d.msgs[1]);
+    stat("Из них авто", d.auto[0] + " / " + d.auto[1]);
+    stat("Ответов", d.replies[0] + " / " + d.replies[1]);
+    stat("Диалогов", d.threads[0] + " · ответили " + d.threads[1]);
+    stat("С доступом", d.with_access + " · работают " + d.working);
+    stat("Аккаунтов", d.linked + " · авто " + d.auto_on);
+    const box = $("admin_users"); box.innerHTML = "";
+    d.users.forEach(u => {
+      const row = el("div", "card urow");
+      const top = el("div", "line");
+      top.append(el("b", "", (u.username ? "@" + u.username : "—") + " · " + u.id),
+                 el("span", u.enabled ? "on" : "", (u.enabled ? "работает" : "стоп") + (u.linked ? " · аккаунт" : "")));
+      row.append(top, el("span", "", "ув. " + u.n[0] + "/" + u.n[1] + " · сообщ. " + u.m[0] + "/" + u.m[1] +
+        " (авто " + u.a[0] + "/" + u.a[1] + ") · ответов " + u.r[0] + "/" + u.r[1] + " · был " + ago(u.seen) + " назад"));
+      row.onclick = () => showUser(u.id);
+      box.appendChild(row);
+    });
+    if (!d.users.length) box.append(el("div", "status", "Пока никого."));
+  } catch (e) { fail(e); }
+}
+async function showUser(id) {
+  try {
+    const u = await api("/api/admin/user?id=" + id);
+    const box = $("admin_detail"); box.innerHTML = "";
+    box.append(el("h2", "", "Человек"));
+    const head = el("div", "card");
+    head.append(el("b", "", (u.username ? "@" + u.username : "—") + " · " + u.id),
+      el("span", "", "доступ: " + u.access + " · работа: " + (u.enabled ? "вкл" : "выкл") + " · режим выгоды: " + (u.profit_mode ? "вкл" : "выкл")),
+      document.createElement("br"),
+      el("span", "", "аккаунт: " + (u.linked ? "привязан " + (u.account || "") : "не привязан") +
+        " · авто: " + (u.auto_ok ? "разрешено" : "нет") + " (" + u.auto_state + ", " + u.auto_sent + " из " + u.auto_limit + ")"),
+      document.createElement("br"), el("span", "", "был: " + ago(u.seen) + " назад"));
+    box.appendChild(head);
+    const tbl = el("table", "tbl"); tbl.append(Object.assign(el("tr"), {}));
+    const th = el("tr"); ["", "24 ч", "7 дн", "всего"].forEach((x, i) => { const c = el("td", "", x); if (i) c.style.color = "#7d7d7d"; th.appendChild(c); }); tbl.appendChild(th);
+    u.counts.filter(c => c.all > 0 || c.d7 > 0).forEach(c => { const r = el("tr"); [c.label, c.d1, c.d7, c.all].forEach(x => r.appendChild(el("td", "", String(x)))); tbl.appendChild(r); });
+    box.appendChild(tbl);
+    if (u.threads.length) {
+      box.append(el("h2", "", "Последние диалоги"));
+      u.threads.forEach(t => { const c = el("div", "card line"); c.append(el("b", "", t.title), el("span", t.replied ? "on" : "", (t.replied ? "ответил" : "ждём") + " · " + ago(t.age))); box.appendChild(c); });
+    }
+    if (!u.admin) {
+      const a1 = el("button", "stop", "Закрыть доступ");
+      a1.onclick = () => tg.showConfirm("Закрыть доступ этому человеку?", async ok => { if (ok) { await api("/api/admin/access", { id: u.id, allowed: false }); $("admin_detail").innerHTML = ""; loadAdmin(); } });
+      const a2 = el("button", "alt", u.auto_ok ? "Запретить авто" : "Разрешить авто");
+      a2.onclick = async () => { await api("/api/admin/autook", { id: u.id, ok: !u.auto_ok }); showUser(u.id); loadAdmin(); };
+      box.append(a2, a1);
+    }
+    box.scrollIntoView({ behavior: "smooth" });
+  } catch (e) { fail(e); }
+}
+$("admin_refresh").onclick = loadAdmin;
+
+// ---------- фильтры ----------
 const PRESETS = {
   profit: () => { $("profit_mode").checked = true; $("profit_rarity").value = 1; $("min_discount").value = 0; },
   rare:   () => { $("profit_mode").checked = true; $("profit_rarity").value = 0.5; },
@@ -259,33 +456,58 @@ const PRESETS = {
   },
 };
 document.querySelectorAll("[data-preset]").forEach(b => b.onclick = () => {
-  PRESETS[b.dataset.preset]();
-  tg.HapticFeedback && tg.HapticFeedback.impactOccurred("light");
+  PRESETS[b.dataset.preset](); tg.HapticFeedback && tg.HapticFeedback.impactOccurred("light");
 });
-
 $("toggle").onclick = async () => {
   try { await api("/api/toggle", { enabled: !ME.enabled }); } catch (e) { tg.showAlert("Нет доступа"); }
   load(false);
 };
-
 $("save").onclick = async () => {
-  await api("/api/filters", {
-    collections: $("collections").value, models: $("models").value, backdrops: $("backdrops").value,
-    price_min: $("price_min").value, price_max: $("price_max").value,
-    profit_mode: $("profit_mode").checked, profit_rarity: $("profit_rarity").value,
-    exclude_collections: $("exclude_collections").value, exclude_models: $("exclude_models").value,
-    exclude_backdrops: $("exclude_backdrops").value, min_discount: $("min_discount").value,
-  });
-  tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
-  tg.showAlert("Сохранено");
-  load();
+  try {
+    await api("/api/filters", {
+      collections: $("collections").value, models: $("models").value, backdrops: $("backdrops").value,
+      price_min: $("price_min").value, price_max: $("price_max").value,
+      profit_mode: $("profit_mode").checked, profit_rarity: $("profit_rarity").value,
+      exclude_collections: $("exclude_collections").value, exclude_models: $("exclude_models").value,
+      exclude_backdrops: $("exclude_backdrops").value, min_discount: $("min_discount").value,
+    });
+    tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
+    tg.showAlert("Сохранено"); load();
+  } catch (e) { fail(e); }
 };
 
 load().catch(e => {
-  $("state").textContent = e.message === "403"
-    ? "🔒 Приватный бот: доступ закрыт. Напиши владельцу."
-    : "Открой приложение из бота";
+  $("state").textContent = e.status === 403 ? "Приватный бот: доступ закрыт. Напиши владельцу." : "Открой приложение из бота";
 });
+
+// ---------- фон: маленькие белые точки падают ----------
+(function () {
+  const c = $("dots"), x = c.getContext && c.getContext("2d");
+  if (!x) return;
+  const reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let w = 0, h = 0, dots = [];
+  const mk = init => ({ x: Math.random() * w, y: init ? Math.random() * h : -4, r: .5 + Math.random() * 1.1,
+                        v: .22 + Math.random() * .6, a: .25 + Math.random() * .6, p: Math.random() * 6.28, s: .3 + Math.random() * .8 });
+  function size() {
+    w = window.innerWidth; h = window.innerHeight; c.width = w * dpr; c.height = h * dpr; x.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const n = Math.round(Math.min(110, Math.max(40, w * h / 9000)));
+    while (dots.length < n) dots.push(mk(true)); dots.length = n;
+  }
+  function draw() {
+    x.clearRect(0, 0, w, h); x.fillStyle = "#fff";
+    for (const d of dots) { x.globalAlpha = d.a; x.beginPath(); x.arc(d.x, d.y, d.r, 0, 6.283); x.fill(); }
+  }
+  function tick(t) {
+    for (const d of dots) {
+      d.y += d.v; d.x += Math.sin(t / 1800 * d.s + d.p) * .22;
+      if (d.y > h + 4) { Object.assign(d, mk(false)); d.x = Math.random() * w; }
+    }
+    draw(); requestAnimationFrame(tick);
+  }
+  size(); window.addEventListener("resize", () => { size(); if (reduce) draw(); });
+  if (reduce) draw(); else requestAnimationFrame(tick);
+})();
 </script>
 </body>
 </html>

@@ -1,13 +1,14 @@
-"""Диалоги с владельцами подарков от имени юзербота.
+"""Диалоги с владельцами подарков от имени ЛИЧНОГО аккаунта пользователя.
 
-Работает ТОЛЬКО по нажатию кнопки «✉️ Написать» в уведомлении - никакой авто-рассылки.
-Ответы владельцев пересылаются в бота с кнопкой «Ответить».
+Каждый человек привязывает свой аккаунт (приложение -> вкладка «Аккаунт»), и сообщения уходят с него.
+Ручная отправка: кнопка «✉️ Написать» под уведомлением. Авто-режим: N сообщений за запуск с паузой
+(включает админ, см. /autoallow). Ответы владельцев приходят в бота с кнопкой «Ответить» (accounts.py).
 
-Защита аккаунта от спам-лимитов:
+Защита аккаунтов от спам-лимитов (у каждого аккаунта свои счётчики):
   * пауза между отправками (RELAY_MIN_GAP), лимит новых диалогов на человека и общий лимит в сутки;
   * одному владельцу первым сообщением не пишем повторно (72 часа);
-  * при PeerFlood/FloodWait отправка автоматически ставится на паузу, админы получают сообщение;
-  * пересылаются только ответы тех, кому мы писали, остальные личные сообщения аккаунта не трогаем.
+  * при PeerFlood/FloodWait отправка с этого аккаунта ставится на паузу, админы получают сообщение;
+  * если сессию отозвали, привязка снимается, человек получает уведомление.
 """
 import asyncio
 import html
@@ -19,14 +20,23 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from telethon import TelegramClient, events
-from telethon.errors import FloodWaitError, PeerFloodError, RPCError, UserIsBlockedError
+from telethon import TelegramClient
+from telethon.errors import (
+    AuthKeyUnregisteredError, FloodWaitError, PeerFloodError, RPCError, SessionExpiredError,
+    SessionRevokedError, UserDeactivatedBanError, UserDeactivatedError, UserIsBlockedError,
+)
+from telethon.tl.functions.payments import GetUniqueStarGiftRequest
 from telethon.tl.types import InputPeerUser
 
-from . import config, db
+from . import accounts, config, db
 
 log = logging.getLogger("relay")
 router = Router()
+
+DEAD = (AuthKeyUnregisteredError, SessionRevokedError, SessionExpiredError,
+        UserDeactivatedError, UserDeactivatedBanError)
+NEED_ACC = "Сначала привяжи свой аккаунт: открой приложение → вкладка «Аккаунт»."
+DEAD_TEXT = "Сессия аккаунта сброшена. Привяжи аккаунт заново (приложение → вкладка «Аккаунт»)."
 
 DEFAULT_TEMPLATES = [
     "Привет! Интересует ваш подарок {collection} #{num}. Готовы продать? Какая цена?",
@@ -50,30 +60,60 @@ class Reply(StatesGroup):
     text = State()
 
 
-_lock = asyncio.Lock()
-_last = 0.0
-_paused_until = 0.0
+class _Acc:
+    """Состояние отправки одного аккаунта."""
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.last = 0.0
+        self.paused_until = 0.0
+
+
+_accs: dict[int, _Acc] = {}
 _inflight: set[tuple] = set()
 
 
+def _acc(uid: int) -> _Acc:
+    return _accs.setdefault(uid, _Acc())
+
+
+def _client(uid: int) -> TelegramClient | None:
+    return accounts.manager.get(uid)
+
+
 # ---------- отправка ----------
-async def deliver(client: TelegramClient, owner_id: int, owner_hash: int, text: str) -> None:
-    """Одно сообщение владельцу: с паузой между отправками и защитой от лимитов."""
-    global _last, _paused_until
-    if time.time() < _paused_until:
-        raise SendError("Отправка приостановлена из-за ограничений Telegram. Попробуй позже.")
-    async with _lock:
-        wait = _last + config.RELAY_MIN_GAP - time.monotonic()
+async def _api(client: TelegramClient, uid: int, request):
+    """Запрос к Telegram от аккаунта человека с понятными ошибками."""
+    try:
+        return await client(request)
+    except DEAD:
+        await accounts.manager.drop(uid)
+        raise SendError(DEAD_TEXT)
+    except FloodWaitError as e:
+        _acc(uid).paused_until = time.time() + e.seconds + 5
+        raise SendError(f"Telegram просит подождать {e.seconds} с.",
+                        alert="relayflood" if e.seconds >= 300 else None)
+
+
+async def deliver(client: TelegramClient, uid: int, owner_id: int, owner_hash: int, text: str) -> None:
+    """Одно сообщение владельцу с аккаунта человека uid: пауза между отправками и защита от лимитов."""
+    acc = _acc(uid)
+    if time.time() < acc.paused_until:
+        raise SendError("Отправка с твоего аккаунта приостановлена из-за ограничений Telegram. Попробуй позже.")
+    async with acc.lock:
+        wait = acc.last + config.RELAY_MIN_GAP - time.monotonic()
         if wait > 0:
             await asyncio.sleep(wait)
         try:
             await client.send_message(InputPeerUser(user_id=owner_id, access_hash=owner_hash), text)
+        except DEAD:
+            await accounts.manager.drop(uid)
+            raise SendError(DEAD_TEXT)
         except PeerFloodError:
-            _paused_until = time.time() + 86400
-            raise SendError("Telegram ограничил аккаунту отправку сообщений незнакомым (спам-лимит). "
+            acc.paused_until = time.time() + 86400
+            raise SendError("Telegram ограничил твоему аккаунту отправку сообщений незнакомым (спам-лимит). "
                             "Отправка отключена на 24 часа.", alert="peerflood")
         except FloodWaitError as e:
-            _paused_until = time.time() + e.seconds + 5
+            acc.paused_until = time.time() + e.seconds + 5
             raise SendError(f"Telegram просит подождать {e.seconds} с.",
                             alert="relayflood" if e.seconds >= 300 else None)
         except UserIsBlockedError:
@@ -88,57 +128,25 @@ async def deliver(client: TelegramClient, owner_id: int, owner_hash: int, text: 
                 raise SendError("Владелец берёт плату за сообщения от незнакомых — напиши ему сам.")
             raise SendError(f"Telegram отклонил отправку: {e}")
         finally:
-            _last = time.monotonic()
+            acc.last = time.monotonic()
 
 
-async def first_message(client: TelegramClient, monitor, buyer_id: int, slug: str, text: str) -> int:
-    """Первое сообщение владельцу подарка; возвращает id диалога."""
-    g = await monitor.fetch(slug)  # заодно обновляет данные владельца у клиента
-    if g is None:
+async def first_message(client: TelegramClient, buyer_id: int, slug: str, text: str) -> int:
+    """Первое сообщение владельцу подарка с аккаунта buyer_id; возвращает id диалога."""
+    try:
+        r = await _api(client, buyer_id, GetUniqueStarGiftRequest(slug=slug))  # заодно кэширует владельца
+    except RPCError:
         raise SendError("Подарок не найден.")
-    uid = getattr(getattr(g, "owner_id", None), "user_id", None)
-    if not uid:
+    g = r.gift
+    owner = getattr(getattr(g, "owner_id", None), "user_id", None)
+    if not owner:
         raise SendError("Владельцу сейчас нельзя написать (скрыт или подарок выведен).")
     try:
-        owner_hash = (await client.get_input_entity(uid)).access_hash
+        owner_hash = (await client.get_input_entity(owner)).access_hash
     except Exception:
         raise SendError("Не удалось получить доступ к владельцу.")
-    await deliver(client, uid, owner_hash, text)
-    return await db.create_thread(buyer_id, uid, owner_hash, slug, getattr(g, "title", slug), g.num)
-
-
-# ---------- входящие ответы ----------
-def setup(client: TelegramClient, bot: Bot) -> None:
-    async def on_message(event) -> None:
-        try:
-            if not event.is_private or event.out:
-                return
-            th = await db.latest_thread_for_owner(event.sender_id)
-            if not th:
-                return  # не наш собеседник - личные сообщения аккаунта не пересылаем
-            await db.touch_thread_in(th["id"])
-            await db.log_event(th["buyer_id"], "reply_in", th["slug"])
-            sender = await event.get_sender()
-            name = " ".join(x for x in (getattr(sender, "first_name", None),
-                                        getattr(sender, "last_name", None)) if x)
-            uname = getattr(sender, "username", None)
-            label = f"{name} (@{uname})" if name and uname else (f"@{uname}" if uname else name or "владелец")
-            text = event.raw_text or ""
-            if event.message.media:
-                text = (text + "\n" if text else "") + "📎 вложение (открой чат с владельцем, чтобы посмотреть)"
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="↩️ Ответить", callback_data=f"rep:{th['id']}")],
-                [InlineKeyboardButton(text="🎁 Открыть подарок", url=f"https://t.me/nft/{th['slug']}")],
-            ])
-            await bot.send_message(
-                th["buyer_id"],
-                f"💬 <b>Ответ по {html.escape(th['collection'])} #{th['num']}</b>\n"
-                f"от {html.escape(label)}:\n\n{html.escape(text[:3500])}",
-                reply_markup=kb)
-        except Exception:
-            log.exception("incoming relay failed")
-
-    client.add_event_handler(on_message, events.NewMessage(incoming=True))
+    await deliver(client, buyer_id, owner, owner_hash, text)
+    return await db.create_thread(buyer_id, owner, owner_hash, slug, getattr(g, "title", slug), g.num)
 
 
 # ---------- интерфейс в боте ----------
@@ -167,21 +175,24 @@ async def _guard(c: CallbackQuery) -> bool:
     return True
 
 
-async def _send_first(message: Message, uid: int, slug: str, text: str, client, monitor) -> None:
+async def _send_first(message: Message, uid: int, slug: str, text: str, monitor) -> None:
+    client = _client(uid)
+    if not client:
+        return await message.answer(NEED_ACC)
     key = (uid, slug)
     if key in _inflight:
         return await message.answer("Уже отправляю…")
     _inflight.add(key)
     try:
-        await first_message(client, monitor, uid, slug, text)
+        await first_message(client, uid, slug, text)
         await db.log_event(uid, "msg_manual", slug)
     except SendError as e:
         if e.alert:
-            await monitor.alert(e.alert, f"⚠️ {e.text}", cooldown=3600)
+            await monitor.alert(f"{e.alert}:{uid}", f"⚠️ [{uid}] {e.text}", cooldown=3600)
         return await message.answer(f"❌ {e.text}")
     finally:
         _inflight.discard(key)
-    await message.answer("✅ Сообщение отправлено владельцу. Если он ответит, я перешлю ответ сюда.")
+    await message.answer("✅ Сообщение отправлено владельцу с твоего аккаунта. Если он ответит, я перешлю ответ сюда.")
 
 
 @router.message(Command("cancel"))
@@ -204,6 +215,8 @@ async def cancel_cb(c: CallbackQuery, state: FSMContext):
 async def msg_start(c: CallbackQuery):
     if not await _guard(c):
         return
+    if not _client(c.from_user.id):
+        return await c.answer(NEED_ACC, show_alert=True)
     slug = c.data[4:]
     g = await db.get_gift(slug)
     if not g or not g.get("owner_id"):
@@ -233,22 +246,26 @@ async def msg_start(c: CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("tpl:"))
-async def tpl_pick(c: CallbackQuery, client: TelegramClient, monitor):
+async def tpl_pick(c: CallbackQuery, monitor):
     if not await _guard(c):
         return
+    if not _client(c.from_user.id):
+        return await c.answer(NEED_ACC, show_alert=True)
     _, i, slug = c.data.split(":", 2)
     g = await db.get_gift(slug)
     tpls = _tpls()
     if not g or not i.isdigit() or int(i) >= len(tpls):
         return await c.answer("Устарело", show_alert=True)
     await c.answer("Отправляю…")
-    await _send_first(c.message, c.from_user.id, slug, _fmt(tpls[int(i)], g), client, monitor)
+    await _send_first(c.message, c.from_user.id, slug, _fmt(tpls[int(i)], g), monitor)
 
 
 @router.callback_query(F.data.startswith("own:"))
 async def own_start(c: CallbackQuery, state: FSMContext):
     if not await _guard(c):
         return
+    if not _client(c.from_user.id):
+        return await c.answer(NEED_ACC, show_alert=True)
     await state.set_state(Compose.text)
     await state.update_data(slug=c.data[4:])
     await c.answer()
@@ -256,7 +273,7 @@ async def own_start(c: CallbackQuery, state: FSMContext):
 
 
 @router.message(Compose.text, F.text)
-async def own_text(m: Message, state: FSMContext, client: TelegramClient, monitor):
+async def own_text(m: Message, state: FSMContext, monitor):
     text = m.text.strip()
     if len(text) > 1000:
         return await m.answer("Слишком длинно, максимум 1000 символов. Сократи или /cancel.")
@@ -264,13 +281,15 @@ async def own_text(m: Message, state: FSMContext, client: TelegramClient, monito
     await state.clear()
     if not await _allowed(m.from_user.id):
         return await m.answer("Нет доступа.")
-    await _send_first(m, m.from_user.id, data["slug"], text, client, monitor)
+    await _send_first(m, m.from_user.id, data["slug"], text, monitor)
 
 
 @router.callback_query(F.data.startswith("rep:"))
 async def rep_start(c: CallbackQuery, state: FSMContext):
     if not await _guard(c):
         return
+    if not _client(c.from_user.id):
+        return await c.answer(NEED_ACC, show_alert=True)
     tid = int(c.data[4:])
     th = await db.get_thread(tid)
     if not th or th["buyer_id"] != c.from_user.id:
@@ -282,7 +301,7 @@ async def rep_start(c: CallbackQuery, state: FSMContext):
 
 
 @router.message(Reply.text, F.text)
-async def rep_text(m: Message, state: FSMContext, client: TelegramClient, monitor):
+async def rep_text(m: Message, state: FSMContext, monitor):
     text = m.text.strip()
     if len(text) > 1000:
         return await m.answer("Слишком длинно, максимум 1000 символов. Сократи или /cancel.")
@@ -290,15 +309,18 @@ async def rep_text(m: Message, state: FSMContext, client: TelegramClient, monito
     await state.clear()
     if not await _allowed(m.from_user.id):
         return await m.answer("Нет доступа.")
+    client = _client(m.from_user.id)
+    if not client:
+        return await m.answer(NEED_ACC)
     th = await db.get_thread(data["tid"])
     if not th or th["buyer_id"] != m.from_user.id:
         return await m.answer("Диалог не найден.")
     try:
-        await deliver(client, th["owner_id"], th["owner_hash"], text)
+        await deliver(client, m.from_user.id, th["owner_id"], th["owner_hash"], text)
         await db.log_event(m.from_user.id, "reply_out", th["slug"])
     except SendError as e:
         if e.alert:
-            await monitor.alert(e.alert, f"⚠️ {e.text}", cooldown=3600)
+            await monitor.alert(f"{e.alert}:{m.from_user.id}", f"⚠️ [{m.from_user.id}] {e.text}", cooldown=3600)
         return await m.answer(f"❌ {e.text}")
     await m.answer("✅ Отправлено.")
 
@@ -320,16 +342,16 @@ def auto_text(u: dict, d: dict) -> str:
     return _fmt(tpls[min(u.get("auto_tpl", 0), len(tpls) - 1)], d)
 
 
-def schedule_auto(bot: Bot, client: TelegramClient, monitor, u: dict, d: dict) -> None:
+def schedule_auto(bot: Bot, monitor, u: dict, d: dict) -> None:
     """Ставит задачу авто-сообщения владельцу подарка, который подошёл под фильтры пользователя."""
     uid = u["user_id"]
-    if not d.get("owner_id") or d["owner_id"] == uid:
+    if not d.get("owner_id") or d["owner_id"] == uid or not _client(uid):
         return
     limit = min(u["auto_limit"], config.AUTO_MAX)
     if u["auto_sent"] + _auto_pending.get(uid, 0) >= limit:
         return  # уже запланировано достаточно
     _auto_pending[uid] = _auto_pending.get(uid, 0) + 1
-    t = asyncio.create_task(_auto_job(bot, client, monitor, uid, d))
+    t = asyncio.create_task(_auto_job(bot, monitor, uid, d))
     _auto_tasks.add(t)
     t.add_done_callback(_auto_tasks.discard)
 
@@ -341,13 +363,17 @@ async def _tell(bot: Bot, uid: int, text: str) -> None:
         log.debug("tell %s failed: %s", uid, e)
 
 
-async def _auto_job(bot: Bot, client: TelegramClient, monitor, uid: int, d: dict) -> None:
+async def _auto_job(bot: Bot, monitor, uid: int, d: dict) -> None:
     title = f"{d['collection']} #{d['num']}"
     try:
         async with _auto_locks.setdefault(uid, asyncio.Lock()):
             u = await db.get_user(uid)
             if not (u and u["auto_state"] == "on" and db.auto_allowed(u) and db.has_access(uid, u)):
                 return
+            client = _client(uid)
+            if not client:
+                await db.auto_control(uid, "pause")
+                return await _tell(bot, uid, "🤖 Авто на паузе: аккаунт не привязан. " + NEED_ACC)
             if u["auto_sent"] >= min(u["auto_limit"], config.AUTO_MAX):
                 return
             if await db.thread_for(uid, d["owner_id"]):
@@ -363,10 +389,10 @@ async def _auto_job(bot: Bot, client: TelegramClient, monitor, uid: int, d: dict
             if not u or u["auto_state"] != "on":
                 return
             try:
-                await first_message(client, monitor, uid, d["slug"], auto_text(u, d))
+                await first_message(client, uid, d["slug"], auto_text(u, d))
             except SendError as e:
                 if e.alert:
-                    await monitor.alert(e.alert, f"⚠️ {e.text}", cooldown=3600)
+                    await monitor.alert(f"{e.alert}:{uid}", f"⚠️ [{uid}] {e.text}", cooldown=3600)
                     await db.auto_control(uid, "pause")
                 await _tell(bot, uid, f"🤖 Авто: не удалось написать владельцу {title}: {e.text}")
                 return
@@ -390,7 +416,10 @@ def auto_panel(u: dict) -> tuple[str, InlineKeyboardMarkup]:
             f"Отправлено: {u['auto_sent']} из {min(u['auto_limit'], config.AUTO_MAX)}\n"
             f"Пауза между сообщениями: {u['auto_gap']} с\n\n"
             "Бот сам пишет владельцам подарков, которые подошли под твои фильтры, пока не наберёт лимит. "
+            "Сообщения уходят с твоего привязанного аккаунта. "
             "Настройки (лимит, пауза, текст) — в приложении, вкладка «Авто».")
+    if not _client(u["user_id"]):
+        text += "\n\n⚠️ " + NEED_ACC
     if not u["enabled"]:
         text += "\n\n⚠️ Работа остановлена — нажми «▶ Начать работу», иначе подарки не приходят."
     B = InlineKeyboardButton
@@ -420,6 +449,8 @@ async def auto_cb(c: CallbackQuery):
     action = c.data[5:]
     if action not in ("start", "pause", "resume", "stop"):
         return await c.answer()
+    if action == "start" and not _client(c.from_user.id):
+        return await c.answer(NEED_ACC, show_alert=True)
     u = await db.auto_control(c.from_user.id, action)
     await db.log_event(c.from_user.id, f"auto_{action}")
     text, kb = auto_panel(u)

@@ -8,7 +8,7 @@ from urllib.parse import parse_qsl
 from aiohttp import web
 from aiogram import Bot
 
-from . import bot as botmod, config, db, relay
+from . import accounts, bot as botmod, config, db, relay, stats
 
 INDEX = Path(__file__).parent / "webapp" / "index.html"
 
@@ -107,6 +107,8 @@ def make_app(bot: Bot) -> web.Application:
             "auto_tpl": row["auto_tpl"], "auto_text": row["auto_text"],
             "auto_max": config.AUTO_MAX, "auto_min_gap": config.AUTO_MIN_GAP, "auto_max_gap": config.AUTO_MAX_GAP,
             "templates": relay._tpls(),
+            "account": await accounts.manager.info(u["id"]),
+            "is_admin": u["id"] in config.ADMIN_IDS,
         })
 
     async def toggle(request):
@@ -161,6 +163,8 @@ def make_app(bot: Bot) -> web.Application:
         action = (await request.json()).get("action")
         if action not in ("start", "pause", "resume", "stop"):
             raise web.HTTPBadRequest()
+        if action == "start" and not accounts.manager.get(u["id"]):
+            return web.json_response({"error": "Сначала привяжи свой аккаунт (вкладка «Аккаунт»)."}, status=400)
         row = await db.auto_control(u["id"], action)
         await db.log_event(u["id"], f"auto_{action}")
         return web.json_response({"auto_state": row["auto_state"], "auto_sent": row["auto_sent"]})
@@ -171,6 +175,86 @@ def make_app(bot: Bot) -> web.Application:
         await db.set_auto_settings(
             u["id"], _int(b.get("limit")) or config.AUTO_MAX, _int(b.get("gap")) or 60,
             _int(b.get("tpl")) or 0, str(b.get("text") or ""))
+        return web.json_response({"ok": True})
+
+    # ----- привязка личного аккаунта -----
+    async def _acc_user(request) -> dict:
+        u = await auth(request)
+        if not db.has_access(u["id"], await db.get_user(u["id"])):
+            raise web.HTTPForbidden()
+        return u
+
+    def _err(e: Exception) -> web.Response:
+        return web.json_response({"error": accounts.explain(e)}, status=400)
+
+    async def acc_phone(request):
+        u = await _acc_user(request)
+        try:
+            await accounts.manager.link_phone(u["id"], str((await request.json()).get("phone", "")))
+        except Exception as e:
+            return _err(e)
+        return web.json_response({"step": "code"})
+
+    async def acc_code(request):
+        u = await _acc_user(request)
+        try:
+            step = await accounts.manager.link_code(u["id"], str((await request.json()).get("code", "")))
+        except Exception as e:
+            return _err(e)
+        return web.json_response({"step": step})
+
+    async def acc_password(request):
+        u = await _acc_user(request)
+        try:
+            await accounts.manager.link_password(u["id"], str((await request.json()).get("password", "")))
+        except Exception as e:
+            return _err(e)
+        return web.json_response({"step": "done"})
+
+    async def acc_unlink(request):
+        u = await _acc_user(request)
+        await accounts.manager.cancel(u["id"])
+        await accounts.manager.unlink(u["id"])
+        return web.json_response({"ok": True})
+
+    # ----- админ-панель -----
+    async def _admin(request) -> dict:
+        u = await auth(request)
+        if u["id"] not in config.ADMIN_IDS:
+            raise web.HTTPForbidden()
+        return u
+
+    async def admin_stats(request):
+        await _admin(request)
+        return web.json_response(await stats.collect())
+
+    async def admin_user(request):
+        await _admin(request)
+        uid = _int(request.query.get("id"))
+        info = await stats.user_info(uid) if uid else None
+        if not info:
+            raise web.HTTPNotFound()
+        return web.json_response(info)
+
+    async def admin_access(request):
+        await _admin(request)
+        b = await request.json()
+        uid, allowed = _int(b.get("id")), bool(b.get("allowed"))
+        if not uid or uid in config.ADMIN_IDS:
+            raise web.HTTPBadRequest()
+        await db.set_allowed(uid, allowed)
+        if not allowed:
+            await db.set_enabled(uid, False)
+            await db.auto_control(uid, "stop")
+        return web.json_response({"ok": True})
+
+    async def admin_autook(request):
+        await _admin(request)
+        b = await request.json()
+        uid = _int(b.get("id"))
+        if not uid:
+            raise web.HTTPBadRequest()
+        await db.set_auto_ok(uid, bool(b.get("ok")))
         return web.json_response({"ok": True})
 
     async def invoice(request):
@@ -190,5 +274,9 @@ def make_app(bot: Bot) -> web.Application:
         web.get("/api/favorites", favorites), web.post("/api/favorites/remove", fav_remove),
         web.post("/api/invoice", invoice),
         web.post("/api/auto", auto_ctl), web.post("/api/auto/settings", auto_settings),
+        web.post("/api/account/phone", acc_phone), web.post("/api/account/code", acc_code),
+        web.post("/api/account/password", acc_password), web.post("/api/account/unlink", acc_unlink),
+        web.get("/api/admin/stats", admin_stats), web.get("/api/admin/user", admin_user),
+        web.post("/api/admin/access", admin_access), web.post("/api/admin/autook", admin_autook),
     ])
     return app
