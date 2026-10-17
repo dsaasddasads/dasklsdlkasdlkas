@@ -1,6 +1,9 @@
+import asyncio
 import hashlib
 import hmac
+import html
 import json
+import re
 import time
 from pathlib import Path
 from urllib.parse import parse_qsl
@@ -8,7 +11,7 @@ from urllib.parse import parse_qsl
 from aiohttp import web
 from aiogram import Bot
 
-from . import accounts, bot as botmod, config, db, relay, stats
+from . import accounts, bot as botmod, config, db, relay, settings, stats
 
 INDEX = Path(__file__).parent / "webapp" / "index.html"
 
@@ -67,7 +70,7 @@ async def _log_app(uid: int) -> None:
         await db.log_event(uid, "app")
 
 
-def make_app(bot: Bot) -> web.Application:
+def make_app(bot: Bot, monitor=None) -> web.Application:
     app = web.Application()
 
     async def auth(request: web.Request) -> dict:
@@ -103,12 +106,14 @@ def make_app(bot: Bot) -> web.Application:
             "plans": config.PLANS,
             "auto_available": db.has_access(u["id"], row) and db.auto_allowed(row),
             "auto_state": row["auto_state"], "auto_sent": row["auto_sent"],
-            "auto_limit": min(row["auto_limit"], config.AUTO_MAX), "auto_gap": row["auto_gap"],
+            "auto_limit": min(row["auto_limit"], settings.get_int("auto_max")), "auto_gap": row["auto_gap"],
             "auto_tpl": row["auto_tpl"], "auto_text": row["auto_text"],
-            "auto_max": config.AUTO_MAX, "auto_min_gap": config.AUTO_MIN_GAP, "auto_max_gap": config.AUTO_MAX_GAP,
+            "auto_max": settings.get_int("auto_max"), "auto_min_gap": config.AUTO_MIN_GAP, "auto_max_gap": config.AUTO_MAX_GAP,
             "templates": relay._tpls(),
             "account": await accounts.manager.info(u["id"]),
             "is_admin": u["id"] in config.ADMIN_IDS,
+            "link_ok": accounts.link_ok(),
+            "flags": {k: settings.get_bool(k) for k in ("notify_paused", "relay_paused", "auto_paused", "link_closed")},
         })
 
     async def toggle(request):
@@ -173,7 +178,7 @@ def make_app(bot: Bot) -> web.Application:
         u = await _auto_user(request)
         b = await request.json()
         await db.set_auto_settings(
-            u["id"], _int(b.get("limit")) or config.AUTO_MAX, _int(b.get("gap")) or 60,
+            u["id"], _int(b.get("limit")) or settings.get_int("auto_max"), _int(b.get("gap")) or 60,
             _int(b.get("tpl")) or 0, str(b.get("text") or ""))
         return web.json_response({"ok": True})
 
@@ -237,7 +242,7 @@ def make_app(bot: Bot) -> web.Application:
         return web.json_response(info)
 
     async def admin_access(request):
-        await _admin(request)
+        admin = await _admin(request)
         b = await request.json()
         uid, allowed = _int(b.get("id")), bool(b.get("allowed"))
         if not uid or uid in config.ADMIN_IDS:
@@ -246,16 +251,118 @@ def make_app(bot: Bot) -> web.Application:
         if not allowed:
             await db.set_enabled(uid, False)
             await db.auto_control(uid, "stop")
+        await db.log_event(admin["id"], "admin", f"access:{uid}:{'on' if allowed else 'off'}")
         return web.json_response({"ok": True})
 
     async def admin_autook(request):
-        await _admin(request)
+        admin = await _admin(request)
         b = await request.json()
         uid = _int(b.get("id"))
         if not uid:
             raise web.HTTPBadRequest()
         await db.set_auto_ok(uid, bool(b.get("ok")))
+        await db.log_event(admin["id"], "admin", f"autook:{uid}:{'on' if b.get('ok') else 'off'}")
         return web.json_response({"ok": True})
+
+    # ----- расширенное управление (только админам) -----
+    LIMITS = {"relay_daily_limit": (0, 100), "relay_min_gap": (5, 600), "auto_max": (1, 20)}
+
+    async def admin_control(request):
+        await _admin(request)
+        now = time.time()
+        accs = await accounts.manager.health()
+        for a in accs:
+            a["paused"] = max(0, int(relay.paused_until(a["id"]) - now))
+        log = [{"age": int(now - r["ts"].timestamp()), "admin": r["user_id"], "what": r["slug"] or ""}
+               for r in await db.admin_log(20)]
+        return web.json_response({
+            "settings": settings.snapshot(), "link_ok": accounts.link_ok(), "link_problem": accounts.problem(),
+            "accounts": accs, "log": log,
+            "health": re.sub(r"<[^>]+>", "", monitor.health()) if monitor else "",
+        })
+
+    async def admin_setting(request):
+        admin = await _admin(request)
+        b = await request.json()
+        key = str(b.get("key", ""))
+        if key not in settings.DEFAULTS:
+            raise web.HTTPBadRequest()
+        kind = settings.DEFAULTS[key][0]
+        if b.get("value") is None:
+            await settings.reset(key)
+            what = "сброшено"
+        elif kind == "bool":
+            await settings.set_value(key, bool(b["value"]))
+            what = "вкл" if b["value"] else "выкл"
+        else:
+            lo, hi = LIMITS[key]
+            n = _int(b["value"])
+            if n is None:
+                raise web.HTTPBadRequest()
+            n = min(max(n, lo), hi)
+            await settings.set_value(key, n)
+            what = str(n)
+        await db.log_event(admin["id"], "admin", f"set:{key}:{what}")
+        return web.json_response({"settings": settings.snapshot()})
+
+    async def admin_user_action(request):
+        admin = await _admin(request)
+        b = await request.json()
+        uid, action = _int(b.get("id")), str(b.get("action", ""))
+        target = await db.get_user(uid) if uid else None
+        if not target:
+            raise web.HTTPNotFound()
+        is_admin = uid in config.ADMIN_IDS
+        note = action
+        if action == "message":
+            text = str(b.get("text", "")).strip()[:1000]
+            if not text:
+                raise web.HTTPBadRequest()
+            try:
+                await bot.send_message(uid, "📣 <b>Сообщение от админа</b>\n\n" + html.escape(text))
+            except Exception:
+                return web.json_response({"error": "Не удалось отправить: человек не запускал бота или заблокировал его."}, status=400)
+        elif is_admin:
+            raise web.HTTPForbidden()  # админов этими действиями не трогаем
+        elif action == "stop_work":
+            await db.set_enabled(uid, False)
+        elif action == "stop_auto":
+            await db.auto_control(uid, "stop")
+        elif action == "reset_auto":
+            await db.auto_reset(uid)
+        elif action == "unlink":
+            await accounts.manager.cancel(uid)
+            await accounts.manager.unlink(uid, by_admin=True)
+        elif action == "limit":
+            n = _int(b.get("value"))
+            await db.set_daily_limit(uid, None if n is None else min(max(n, 0), 200))
+            note = f"limit={'по умолчанию' if n is None else min(max(n, 0), 200)}"
+        else:
+            raise web.HTTPBadRequest()
+        await db.log_event(admin["id"], "admin", f"user:{uid}:{note}")
+        return web.json_response({"ok": True})
+
+    _bg: set = set()
+
+    async def _send_all(text: str, ids: list[int]) -> None:
+        for uid in ids:
+            try:
+                await bot.send_message(uid, "📣 <b>Объявление</b>\n\n" + html.escape(text))
+            except Exception:
+                pass
+            await asyncio.sleep(0.05)
+
+    async def admin_broadcast(request):
+        admin = await _admin(request)
+        text = str((await request.json()).get("text", "")).strip()[:1000]
+        if not text:
+            raise web.HTTPBadRequest()
+        ids = [r["user_id"] for r in await db.list_users() if db.has_access(r["user_id"], r)]
+        t = asyncio.create_task(_send_all(text, ids))
+        _bg.add(t)
+        t.add_done_callback(_bg.discard)
+        await db.log_event(admin["id"], "admin", f"broadcast:{len(ids)}")
+        return web.json_response({"queued": len(ids)})
 
     async def invoice(request):
         await auth(request)
@@ -278,5 +385,7 @@ def make_app(bot: Bot) -> web.Application:
         web.post("/api/account/password", acc_password), web.post("/api/account/unlink", acc_unlink),
         web.get("/api/admin/stats", admin_stats), web.get("/api/admin/user", admin_user),
         web.post("/api/admin/access", admin_access), web.post("/api/admin/autook", admin_autook),
+        web.get("/api/admin/control", admin_control), web.post("/api/admin/setting", admin_setting),
+        web.post("/api/admin/user_action", admin_user_action), web.post("/api/admin/broadcast", admin_broadcast),
     ])
     return app

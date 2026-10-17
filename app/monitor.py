@@ -18,6 +18,7 @@ import logging
 import random
 import re
 import time
+from collections import Counter
 from typing import Awaitable, Callable
 
 from telethon import TelegramClient
@@ -33,6 +34,7 @@ from telethon.tl.functions.payments import (
 )
 
 from . import config, db
+from .markets import Portals
 
 log = logging.getLogger("monitor")
 
@@ -61,7 +63,47 @@ def stars_of(amt) -> int | None:
     return amt if isinstance(amt, int) else None
 
 
-def parse(g, prefix: str) -> dict:
+def ton_of(amt) -> float | None:
+    """resell_amount (список с StarsTonAmount, нанотоны) -> цена в GRAM (бывший TON)."""
+    if isinstance(amt, list):
+        v = next((a.amount for a in amt if type(a).__name__ == "StarsTonAmount"), None)
+        return v / 1e9 if isinstance(v, int) else None
+    return None
+
+
+def owner_contact(u) -> dict:
+    """Можно ли написать владельцу: живой пользователь, есть username, нет Premium-only/платных сообщений."""
+    out = {"owner_username": None, "owner_label": None, "owner_reachable": False, "owner_note": None}
+    name = " ".join(x for x in (getattr(u, "first_name", None), getattr(u, "last_name", None)) if x)
+    if getattr(u, "deleted", False):
+        out["owner_note"] = "аккаунт удалён"
+        return out
+    if getattr(u, "bot", False):
+        out["owner_note"] = "владелец - бот"
+        return out
+    uname = getattr(u, "username", None)
+    if not uname:
+        for x in getattr(u, "usernames", None) or []:
+            if getattr(x, "active", True) and getattr(x, "username", None):
+                uname = x.username
+                break
+    out["owner_username"] = uname
+    out["owner_label"] = (f"{name} (@{uname})" if name and uname else f"@{uname}" if uname else name) or None
+    if config.REQUIRE_USERNAME and not uname:
+        out["owner_note"] = "нет username"
+        return out
+    if not config.ALLOW_RESTRICTED:
+        if getattr(u, "contact_require_premium", False):
+            out["owner_note"] = "пишут только Premium"
+            return out
+        if (getattr(u, "send_paid_messages_stars", 0) or 0) > 0:
+            out["owner_note"] = "платные сообщения"
+            return out
+    out["owner_reachable"] = True
+    return out
+
+
+def parse(g, prefix: str, users=()) -> dict:
     oid = getattr(g, "owner_id", None)
     d = {
         "slug": g.slug,
@@ -85,6 +127,15 @@ def parse(g, prefix: str) -> dict:
         "backdrop_floor": None, "backdrop_listed": None,
         "combo_floor": None, "combo_listed": None,
     }
+    if d["owner_id"] is None:
+        d.update(owner_username=None, owner_label=None, owner_reachable=False,
+                 owner_note="владелец скрыт или кошелёк")
+    else:
+        u = next((x for x in users if getattr(x, "id", None) == d["owner_id"]), None)
+        if u is not None:
+            d.update(owner_contact(u))
+        else:  # профиль не пришёл вместе с подарком - дозапросим позже (resolve_owner), если подарок подойдёт
+            d.update(owner_username=None, owner_label=None, owner_reachable=None, owner_note=None)
     usd = getattr(g, "value_usd_amount", None)
     if isinstance(usd, int):
         d["est_usd"] = usd / 100  # предполагаем центы
@@ -103,13 +154,17 @@ def parse(g, prefix: str) -> dict:
     return d
 
 
-def usable(d: dict) -> bool:
-    """Подарок подходит, если владельцу можно написать и на подарок можно отправить Offer to Buy."""
-    if config.ONLY_CONTACTABLE and not d.get("owner_id"):
-        return False  # владелец скрыт, канал или кошелёк TON
+def skip_reason(d: dict) -> str | None:
+    """Почему подарок не показываем (None - подходит): владельцу нельзя написать или оффер недоступен."""
     if config.REQUIRE_OFFER and OFFER_SUPPORTED and d.get("offer_min") is None:
-        return False
-    return True
+        return "оффер недоступен"
+    if config.ONLY_CONTACTABLE and d.get("owner_reachable") is False:
+        return d.get("owner_note") or "нельзя написать"
+    return None
+
+
+def usable(d: dict) -> bool:
+    return skip_reason(d) is None
 
 
 def _attr_ids(d: dict):
@@ -155,6 +210,9 @@ class Monitor:
         self.stalled = False
         self.passed = 0
         self.skipped = 0
+        self.skip_reasons: Counter = Counter()
+        self.ton_per_star: float | None = None  # курс по листингам Telegram: сколько GRAM в одной ⭐
+        self.portals = Portals() if config.PORTALS else None
         self.limiter = Limiter(config.RPS)
         self.state: dict[str, dict] = {}  # prefix -> {cursor, interval, next}
         self._stats: dict[tuple, tuple[float, tuple]] = {}
@@ -168,7 +226,7 @@ class Monitor:
             try:
                 r = await self.client(GetUniqueStarGiftRequest(slug=slug))
                 self._touch()
-                return r.gift
+                return r  # .gift и .users (профиль владельца)
             except FATAL as e:
                 await self.alert(
                     "fatal",
@@ -190,7 +248,7 @@ class Monitor:
                 return None  # такого номера ещё нет
 
     async def exists(self, slug: str) -> bool:
-        return await self.fetch(slug) is not None
+        return (await self.fetch(slug)) is not None
 
     async def find_max(self, prefix: str) -> int:
         """Текущий максимальный номер (экспоненциальный + бинарный поиск)."""
@@ -223,7 +281,11 @@ class Monitor:
             self._touch()
             count = getattr(r, "count", None)
             if r.gifts:
-                price = stars_of(getattr(r.gifts[0], "resell_amount", None))
+                amt = getattr(r.gifts[0], "resell_amount", None)
+                price = stars_of(amt)
+                ton = ton_of(amt)
+                if price and ton:
+                    self.ton_per_star = ton / price
         except FATAL:
             raise
         except FloodWaitError as e:
@@ -243,20 +305,48 @@ class Monitor:
         return (await self.stats(gift_id, [], "all"))[0]
 
     async def valuate(self, d: dict) -> None:
-        """Дописывает в подарок флор модели, фона и пары модель+фон (с числом листингов)."""
-        if d.get("valuated") or not d.get("gift_id"):
+        """Дописывает в подарок цены: Telegram (флор модели, фона, пары) и Portals."""
+        if d.get("valuated"):
             return
         d["valuated"] = True
-        gid = d["gift_id"]
-        model, back = _attr_ids(d)
-        if model:
-            d["model_floor"], d["model_listed"] = await self.stats(gid, [model], f"m:{d['model_doc']}")
-        if back:
-            d["backdrop_floor"], d["backdrop_listed"] = await self.stats(
-                gid, [back], f"b:{d['backdrop_id']}")
-        if model and back:
-            d["combo_floor"], d["combo_listed"] = await self.stats(
-                gid, [model, back], f"mb:{d['model_doc']}:{d['backdrop_id']}")
+        gid = d.get("gift_id")
+        if gid:
+            model, back = _attr_ids(d)
+            if model:
+                d["model_floor"], d["model_listed"] = await self.stats(gid, [model], f"m:{d['model_doc']}")
+            if back:
+                d["backdrop_floor"], d["backdrop_listed"] = await self.stats(
+                    gid, [back], f"b:{d['backdrop_id']}")
+            if model and back:
+                d["combo_floor"], d["combo_listed"] = await self.stats(
+                    gid, [model, back], f"mb:{d['model_doc']}:{d['backdrop_id']}")
+        d["ton_per_star"] = self.ton_per_star
+        if self.portals:
+            try:
+                await self.portals.valuate(d)
+            except Exception as e:  # внешний маркет не должен ронять уведомления
+                log.debug("portals valuate failed: %s", e)
+
+    async def resolve_owner(self, d: dict) -> None:
+        """Профиль владельца не пришёл вместе с подарком - дозапрашиваем (один запрос через лимитер)."""
+        if d.get("owner_reachable") is not None:
+            return
+        try:
+            await self.limiter.wait()
+            d.update(owner_contact(await self.client.get_entity(d["owner_id"])))
+        except FATAL:
+            raise
+        except FloodWaitError as e:
+            self.limiter.punish()
+            log.warning("FloodWait %ss on get_entity", e.seconds)
+            d.update(owner_reachable=False, owner_note="профиль не загрузился")
+        except Exception:
+            d.update(owner_reachable=False, owner_note="профиль недоступен")
+
+    def count_skip(self, d: dict, why: str) -> None:
+        self.skipped += 1
+        self.skip_reasons[why] += 1
+        log.info("%s пропущен: %s", d.get("slug"), why)
 
     # ---------- collections ----------
     async def refresh_collections(self) -> None:
@@ -284,8 +374,9 @@ class Monitor:
 
     # ---------- main loop ----------
     async def _emit(self, data: dict) -> None:
-        if not usable(data):  # до запросов к маркету - экономим запросы
-            self.skipped += 1
+        why = skip_reason(data)  # до запросов к маркету - экономим запросы
+        if why:
+            self.count_skip(data, why)
             return
         self.passed += 1
         try:
@@ -300,10 +391,10 @@ class Monitor:
         found = False
         n = s["cursor"] + 1
         while True:
-            g = await self.fetch(f"{prefix}-{n}")
-            if g is None:
+            r = await self.fetch(f"{prefix}-{n}")
+            if r is None:
                 return found
-            data = parse(g, prefix)
+            data = parse(r.gift, prefix, getattr(r, "users", None) or [])
             s["cursor"] = n
             await db.set_cursor(prefix, n)
             self.last_gift = time.monotonic()
@@ -404,7 +495,8 @@ class Monitor:
             f"Последний ответ Telegram: {_ago(now - self.last_ok)} назад\n"
             f"Последний новый подарок: {_ago(now - self.last_gift)} назад\n"
             f"Скорость запросов: {rate:.1f}/с (штраф ×{self.limiter.penalty:.1f})\n"
-            f"Подходящих подарков: {self.passed}, пропущено (нельзя написать или оффер): {self.skipped}"
+            f"Подходящих подарков: {self.passed}, пропущено: {self.skipped}"
+            + "".join(f"\n   · {k}: {v}" for k, v in self.skip_reasons.most_common(5))
         )
 
 

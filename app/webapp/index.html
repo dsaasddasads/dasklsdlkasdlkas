@@ -3,116 +3,126 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
 <title>Gift Track</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-  :root { --fg:#ededed; --muted:#7d7d7d; --line:#1f1f1f; --line2:#2e2e2e; --bad:#ff6b6b; --good:#7ddc9a; }
+  :root { --fg:#ededed; --muted:#7d7d7d; --line:#1f1f1f; --line2:#2e2e2e; --bad:#ff6b6b; --good:#7ddc9a;
+          --ease:cubic-bezier(.2,.8,.2,1); }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html { background:#000; }
-  body { margin:0; color:var(--fg); background:transparent;
-         font-family:"Inter",-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;
-         font-weight:300; font-size:15px; line-height:1.5; letter-spacing:.01em; }
+  body { margin:0; color:var(--fg); background:transparent; font:300 15px/1.5 "Inter",-apple-system,"Helvetica Neue",Arial,sans-serif; letter-spacing:.01em; }
   #dots { position:fixed; inset:0; width:100%; height:100%; z-index:0; pointer-events:none; }
-  .wrap { position:relative; z-index:1; max-width:560px; margin:0 auto; padding:0 18px 70px; }
+  .wrap { position:relative; z-index:1; max-width:560px; margin:0 auto; padding:0 18px 80px; }
 
-  .tabs { display:flex; gap:2px; overflow-x:auto; scrollbar-width:none; margin:0 -18px 6px; padding:0 18px;
-          border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5;
-          background:rgba(0,0,0,.82); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); }
+  .tabs { position:sticky; top:0; z-index:5; display:flex; gap:2px; overflow-x:auto; scrollbar-width:none; margin:0 -18px 6px; padding:0 18px;
+          border-bottom:1px solid var(--line); background:rgba(0,0,0,.82); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); }
   .tabs::-webkit-scrollbar { display:none; }
   button.tab { flex:none; width:auto; margin:0; padding:14px 11px; font-size:13px; font-weight:400; letter-spacing:.04em;
-               background:transparent; color:var(--muted); border:0; border-bottom:1px solid transparent; border-radius:0; }
-  button.tab.active { color:#fff; border-bottom-color:#fff; }
+               background:transparent; color:var(--muted); border:0; border-radius:0; transition:color .25s; }
+  button.tab.active { color:#fff; }
+  #ind { position:absolute; left:0; bottom:0; height:1px; width:0; background:#fff; transition:transform .38s var(--ease), width .38s var(--ease); }
 
-  h2 { font-size:11px; font-weight:400; letter-spacing:.2em; text-transform:uppercase; color:var(--muted); margin:32px 0 12px; }
-  .card { border:1px solid var(--line); border-radius:14px; padding:14px 16px; margin-bottom:10px; background:rgba(0,0,0,.55); }
+  section { display:none; }
+  section.active { display:block; opacity:1; transform:none; transition:opacity .28s ease, transform .34s var(--ease); }
+  section.enter { opacity:0; transform:translateX(var(--dx,0)); transition:none; }
+  section.leave { opacity:0; transform:translateX(var(--dx,0)); transition:opacity .12s ease, transform .13s ease-in; }
+  @keyframes rise { from { opacity:0; transform:translateY(7px); } to { opacity:1; transform:none; } }
+  .sub { display:none; } .sub.active { display:block; animation:rise .32s var(--ease) both; }
+
+  h2 { font-size:11px; font-weight:400; letter-spacing:.2em; text-transform:uppercase; color:var(--muted); margin:28px 0 12px; }
+  .gap { height:14px; }
+  .card, .status { border:1px solid var(--line); border-radius:14px; padding:14px 16px; margin-bottom:10px; background:rgba(0,0,0,.55); transition:border-color .2s; }
+  .status { font-size:14px; }
   .card b { display:block; font-weight:400; font-size:15px; }
   .card span, .muted { color:var(--muted); font-size:13px; }
-  .row { display:flex; gap:10px; } .row > div { flex:1; } .row > button { flex:1; }
+  .row { display:flex; gap:10px; } .row > div, .row > button { flex:1; }
   .line { display:flex; justify-content:space-between; align-items:center; gap:12px; }
-  .status { font-size:14px; padding:14px 16px; border:1px solid var(--line); border-radius:14px; background:rgba(0,0,0,.55); }
   .on { color:var(--good); } .off { color:var(--bad); }
   .hint { font-size:12px; color:var(--muted); margin-top:8px; line-height:1.55; }
   .note { font-size:12.5px; color:#b5b5b5; border-left:1px solid var(--line2); padding:2px 0 2px 12px; margin:14px 0; line-height:1.6; }
+  .urow { cursor:pointer; } .urow:active { border-color:var(--line2); }
 
   label { display:block; font-size:12px; color:var(--muted); margin:16px 0 6px; letter-spacing:.04em; }
   label.check { display:flex; gap:10px; align-items:flex-start; color:#cfcfcf; font-size:13px; letter-spacing:0; }
   input[type=text], input[type=number], input[type=tel], input[type=password], select, textarea {
-    width:100%; padding:13px 14px; border-radius:12px; border:1px solid var(--line2); background:rgba(0,0,0,.6);
-    color:#fff; font-size:15px; font-weight:300; font-family:inherit; }
+    width:100%; padding:13px 14px; border-radius:12px; border:1px solid var(--line2); background:rgba(0,0,0,.6); color:#fff;
+    font:300 15px "Inter",sans-serif; transition:border-color .2s; }
   input:focus, select:focus, textarea:focus { outline:none; border-color:#8a8a8a; }
-  input[type=checkbox] { width:auto; accent-color:#fff; margin-top:3px; }
   input::placeholder, textarea::placeholder { color:#555; }
   input[type=number]::-webkit-inner-spin-button { display:none; }
+  input[type=checkbox] { accent-color:#fff; margin-top:3px; }
+  .sw { appearance:none; -webkit-appearance:none; flex:none; width:42px; height:24px; border-radius:12px; background:var(--line2); position:relative; margin:0; cursor:pointer; transition:background .25s; }
+  .sw::after { content:""; position:absolute; top:3px; left:3px; width:18px; height:18px; border-radius:50%; background:#000; transition:transform .28s var(--ease); }
+  .sw:checked { background:#fff; } .sw:checked::after { transform:translateX(18px); }
 
-  button { width:100%; margin-top:14px; padding:14px; border:0; border-radius:12px; font-size:15px; font-weight:500;
-           font-family:inherit; letter-spacing:.02em; background:#fff; color:#000; }
-  button:active { opacity:.8; }
+  button { width:100%; margin-top:14px; padding:14px; border:0; border-radius:12px; font:500 15px "Inter",sans-serif; letter-spacing:.02em;
+           background:#fff; color:#000; cursor:pointer; transition:opacity .15s, transform .15s var(--ease), background .2s; }
+  button:active { opacity:.8; transform:scale(.985); }
   button:disabled { opacity:.3; }
   button.alt { background:transparent; color:#fff; border:1px solid var(--line2); font-weight:400; }
   button.stop { background:transparent; color:var(--bad); border:1px solid #3d1c1c; font-weight:400; }
   button.mini { width:auto; margin:0; padding:8px 13px; font-size:13px; }
   .presets { display:flex; gap:8px; flex-wrap:wrap; }
   .presets button { flex:1; min-width:30%; margin:0; padding:11px 8px; font-size:13px; }
+  .seg { display:flex; gap:6px; margin-bottom:14px; overflow-x:auto; scrollbar-width:none; }
+  .seg button { flex:1; width:auto; margin:0; padding:9px 10px; font-size:13px; font-weight:400; background:transparent; color:var(--muted); border:1px solid var(--line); white-space:nowrap; }
+  .seg button.on { color:#000; background:#fff; border-color:#fff; }
 
-  section { display:none; } section.active { display:block; }
   .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
   .stat { border:1px solid var(--line); border-radius:14px; padding:12px 14px; background:rgba(0,0,0,.55); }
   .stat span { display:block; color:var(--muted); font-size:11px; letter-spacing:.12em; text-transform:uppercase; }
   .stat b { display:block; font-weight:300; font-size:20px; margin-top:4px; }
-  .urow { cursor:pointer; }
   .tbl { width:100%; border-collapse:collapse; font-size:13px; margin-top:8px; }
   .tbl td { padding:6px 0; border-bottom:1px solid var(--line); } .tbl td:not(:first-child) { text-align:right; color:#cfcfcf; }
+  pre { white-space:pre-wrap; font:300 12px/1.6 "Inter",sans-serif; color:var(--muted); margin:0; }
+
+  #toast { position:fixed; left:50%; bottom:calc(24px + env(safe-area-inset-bottom)); z-index:20; transform:translate(-50%,16px); opacity:0; pointer-events:none;
+           padding:11px 18px; border-radius:22px; background:#fff; color:#000; font:400 13px "Inter",sans-serif; transition:opacity .25s, transform .35s var(--ease); }
+  #toast.show { opacity:1; transform:translate(-50%,0); }
+  @media (prefers-reduced-motion: reduce) { * { transition:none !important; animation:none !important; } }
 </style>
 </head>
 <body>
 <canvas id="dots"></canvas>
+<div id="toast"></div>
 <div class="wrap">
-  <div class="tabs">
+  <div class="tabs" id="tabs">
     <button class="tab active" data-tab="home">Главная</button>
     <button class="tab" data-tab="filters">Фильтры</button>
     <button class="tab" data-tab="account">Аккаунт</button>
     <button class="tab" data-tab="auto" id="tab-auto-btn" style="display:none">Авто</button>
     <button class="tab" data-tab="favs">Избранное</button>
     <button class="tab" data-tab="admin" id="tab-admin-btn" style="display:none">Админ</button>
+    <i id="ind"></i>
   </div>
 
-  <!-- ГЛАВНАЯ -->
   <section id="tab-home" class="active">
-    <div style="height:14px"></div>
+    <div class="gap"></div>
     <div class="status" id="state">Загрузка…</div>
+    <div class="status" id="banner" style="display:none"></div>
     <button id="toggle" disabled>…</button>
-
     <h2>Аккаунт</h2>
     <div class="status" id="home_acc">…</div>
-
     <div id="subbox">
       <h2>Подписка</h2>
       <div class="status" id="status"></div>
       <div id="plans"></div>
     </div>
-
-    <h2>Возможности</h2>
-    <div class="card"><b>Мгновенные уведомления</b><span>Сразу после каждого улучшения</span></div>
-    <div class="card"><b>Оценка рынка</b><span>Флор коллекции, модели, фона и пары</span></div>
-    <div class="card"><b>Сообщения владельцам</b><span>С твоего аккаунта, ответы приходят в бота</span></div>
-    <div class="card"><b>Выгодные предложения</b><span>Редкость, премия к рынку, красивые номера</span></div>
   </section>
 
-  <!-- ФИЛЬТРЫ -->
   <section id="tab-filters">
-    <h2>Быстрые настройки</h2>
+    <div class="gap"></div>
     <div class="presets">
       <button class="alt" data-preset="profit">Выгодные</button>
-      <button class="alt" data-preset="rare">Только редкие</button>
+      <button class="alt" data-preset="rare">Редкие</button>
       <button class="alt" data-preset="reset">Сбросить</button>
     </div>
-    <div class="hint">Быстрая настройка заполняет поля — потом нажми «Сохранить».</div>
-
-    <h2>Что показывать</h2>
-    <label>Коллекции (через запятую, пусто = все)</label>
+    <h2>Показывать</h2>
+    <label>Коллекции (пусто = все)</label>
     <input type="text" id="collections" placeholder="Plush Pepe, Heart Locket">
     <label>Модели</label>
     <input type="text" id="models" placeholder="часть названия">
@@ -122,42 +132,34 @@
       <div><label>Цена от, ⭐</label><input type="number" id="price_min" inputmode="numeric"></div>
       <div><label>Цена до, ⭐</label><input type="number" id="price_max" inputmode="numeric"></div>
     </div>
-
     <h2>Исключить</h2>
     <label>Коллекции</label>
-    <input type="text" id="exclude_collections" placeholder="что не показывать">
+    <input type="text" id="exclude_collections">
     <label>Модели</label>
-    <input type="text" id="exclude_models" placeholder="что не показывать">
+    <input type="text" id="exclude_models">
     <label>Фоны</label>
-    <input type="text" id="exclude_backdrops" placeholder="что не показывать">
-
-    <h2>Выгодные предложения</h2>
-    <div class="line"><span>Включить режим</span><input type="checkbox" id="profit_mode"></div>
-    <div class="hint">Подарок проходит, если есть редкий признак (не чаще порога ниже), или модель/фон заметно дороже флора коллекции по рынку, или красивый номер (до 100, 777, 1000, 12321). Если подарок уже выставлен на продажу, цена сравнивается с оценкой рынка.</div>
+    <input type="text" id="exclude_backdrops">
+    <h2>Выгодные</h2>
+    <div class="line"><span>Включить режим</span><input type="checkbox" class="sw" id="profit_mode"></div>
+    <div class="hint">Редкий признак, наценка к рынку, красивый номер или цена ниже Portals.</div>
     <label>Макс. редкость признака, %</label>
     <input type="number" id="profit_rarity" step="0.1" min="0.1" max="100" value="1">
-    <label>Мин. скидка для выставленных подарков, %</label>
+    <label>Мин. скидка для выставленных, %</label>
     <input type="number" id="min_discount" step="1" min="0" max="95" value="0">
     <button id="save">Сохранить</button>
   </section>
 
-  <!-- АККАУНТ -->
   <section id="tab-account">
-    <div style="height:14px"></div>
+    <div class="gap"></div>
     <div id="acc_linked" style="display:none">
       <div class="card"><b id="acc_name"></b><span id="acc_meta"></span></div>
-      <div class="hint">Сообщения владельцам уходят с этого аккаунта. Ответы владельцев приходят в чат с ботом.</div>
-      <button class="stop" id="acc_unlink">Отвязать аккаунт</button>
-      <div class="hint">При отвязке сессия завершается на стороне Telegram.</div>
+      <div class="hint">Сообщения владельцам уходят с этого аккаунта, ответы приходят в бота.</div>
+      <button class="stop" id="acc_unlink">Отвязать</button>
     </div>
-
     <div id="acc_form">
-      <div class="hint" style="font-size:14px; color:#cfcfcf">Привяжи свой аккаунт Telegram: с него бот будет писать владельцам подарков, а ответы придут сюда.</div>
-      <div class="note">
-        Бот получит доступ к аккаунту: сможет отправлять сообщения и читать ответы владельцев, с которыми ты начал диалог. Другие твои чаты бот не пересылает. Сессия хранится в зашифрованном виде, но администратор бота имеет доступ к серверу — привязывай аккаунт, только если доверяешь ему. Лучше использовать отдельный аккаунт. Отвязать можно в любой момент здесь или в Telegram: Настройки → Устройства.
-      </div>
-      <label class="check"><input type="checkbox" id="acc_consent"><span>Я понимаю это и согласен</span></label>
-
+      <div id="acc_closed" class="status off" style="display:none"></div>
+      <div class="note">Бот сможет писать с аккаунта и читать ответы владельцев, которым ты писал. Другие чаты он не читает. Сессия хранится зашифрованной, но админ бота имеет доступ к серверу, поэтому лучше отдельный аккаунт. Отвязать можно здесь или в Настройки → Устройства.</div>
+      <label class="check"><input type="checkbox" id="acc_consent"><span>Я понимаю и согласен</span></label>
       <div id="acc_step_phone">
         <label>Номер телефона</label>
         <input type="tel" id="acc_phone" placeholder="+380..." autocomplete="tel">
@@ -168,7 +170,7 @@
         <input type="text" id="acc_code" inputmode="numeric" placeholder="12345" autocomplete="one-time-code">
         <button id="acc_login">Войти</button>
         <button class="alt" id="acc_back">Другой номер</button>
-        <div class="hint">Код придёт в приложение Telegram на этом аккаунте (чат «Telegram»).</div>
+        <div class="hint">Код придёт в чат «Telegram». Вводи его только здесь.</div>
       </div>
       <div id="acc_step_pw" style="display:none">
         <label>Пароль двухэтапной проверки</label>
@@ -178,50 +180,68 @@
     </div>
   </section>
 
-  <!-- АВТО -->
   <section id="tab-auto">
-    <div style="height:14px"></div>
+    <div class="gap"></div>
     <div class="status" id="auto_status">…</div>
     <div class="row" id="auto_ctl"></div>
-
     <h2>Настройки</h2>
-    <label>Сколько сообщений за один запуск</label>
+    <label>Сообщений за запуск</label>
     <input type="number" id="auto_limit" min="1" max="5" value="5">
     <label>Пауза между сообщениями, сек</label>
     <input type="number" id="auto_gap" min="30" max="600" value="60">
-    <label>Текст сообщения</label>
+    <label>Текст</label>
     <select id="auto_tpl"></select>
-    <textarea id="auto_text" rows="4" maxlength="500" style="display:none; margin-top:8px"
-              placeholder="Свой текст. Можно использовать {collection} и {num}"></textarea>
-    <div class="hint">Авто пишет только владельцам подарков, которые подошли под твои фильтры, с твоего привязанного аккаунта. Одному владельцу — не чаще раза в 72 часа. После лимита режим сам выключается.</div>
-    <button id="auto_save">Сохранить настройки</button>
+    <textarea id="auto_text" rows="4" maxlength="500" style="display:none; margin-top:8px" placeholder="Свой текст. Можно {collection} и {num}"></textarea>
+    <div class="hint">Пишет владельцам подарков по твоим фильтрам, не чаще раза в 72 часа одному. После лимита выключается.</div>
+    <button id="auto_save">Сохранить</button>
   </section>
 
-  <!-- ИЗБРАННОЕ -->
-  <section id="tab-favs">
-    <div style="height:14px"></div>
-    <div id="favs"></div>
-  </section>
+  <section id="tab-favs"><div class="gap"></div><div id="favs"></div></section>
 
-  <!-- АДМИН -->
   <section id="tab-admin">
-    <div style="height:14px"></div>
-    <button class="alt" id="admin_refresh" style="margin-top:0">Обновить</button>
-    <h2>Итоги · 24 ч / 7 дн</h2>
-    <div class="grid" id="admin_totals"></div>
-    <h2>Люди</h2>
-    <div id="admin_users"></div>
-    <div id="admin_detail"></div>
+    <div class="gap"></div>
+    <div class="seg" id="admin_seg">
+      <button class="on" data-sub="totals">Итоги</button><button data-sub="people">Люди</button>
+      <button data-sub="ctl">Управление</button><button data-sub="log">Журнал</button>
+    </div>
+    <div class="sub active" id="sub-totals">
+      <div class="grid" id="admin_totals"></div>
+      <h2>Состояние</h2>
+      <div class="card"><pre id="admin_health">…</pre></div>
+    </div>
+    <div class="sub" id="sub-people">
+      <div id="admin_users"></div>
+      <div id="admin_detail"></div>
+    </div>
+    <div class="sub" id="sub-ctl">
+      <h2>Переключатели</h2>
+      <div id="ctl_flags"></div>
+      <div id="ctl_note" class="hint"></div>
+      <h2>Лимиты</h2>
+      <label>Новых диалогов в сутки на человека</label><input type="number" id="set_relay_daily_limit" min="0" max="100">
+      <label>Пауза между отправками, сек</label><input type="number" id="set_relay_min_gap" min="5" max="600">
+      <label>Авто: максимум за запуск</label><input type="number" id="set_auto_max" min="1" max="20">
+      <button id="ctl_save">Сохранить лимиты</button>
+      <h2>Объявление</h2>
+      <textarea id="bc_text" rows="3" maxlength="1000" placeholder="Текст всем, у кого есть доступ"></textarea>
+      <button class="alt" id="bc_send">Отправить всем</button>
+      <h2>Аккаунты</h2>
+      <div id="ctl_accounts"></div>
+    </div>
+    <div class="sub" id="sub-log"><div id="admin_log"></div></div>
+    <button class="alt" id="admin_refresh">Обновить</button>
   </section>
 </div>
 
 <script>
 const tg = window.Telegram.WebApp; tg.ready(); tg.expand();
 try { tg.setBackgroundColor("#000000"); tg.setHeaderColor("#000000"); } catch (e) {}
+const REDUCE = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
 const H = { "Content-Type":"application/json", "X-Init-Data": tg.initData };
 const $ = id => document.getElementById(id);
 const FIELDS = ["collections","models","backdrops","exclude_collections","exclude_models","exclude_backdrops"];
-let ME = null, accStep = "phone";
+const TABS = ["home","filters","account","auto","favs","admin"];
+let ME = null, accStep = "phone", cur = "home", swId = 0;
 
 async function api(path, body) {
   const r = await fetch(path, body !== undefined ? { method:"POST", headers:H, body:JSON.stringify(body) } : { headers:H });
@@ -231,24 +251,46 @@ async function api(path, body) {
 }
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
 const ago = s => s == null ? "—" : s < 60 ? s + " с" : s < 3600 ? Math.floor(s / 60) + " мин" : s < 86400 ? Math.floor(s / 3600) + " ч" : Math.floor(s / 86400) + " дн";
-const fail = e => tg.showAlert(e.message || "Ошибка");
+const haptic = k => tg.HapticFeedback && tg.HapticFeedback.notificationOccurred(k);
+const fail = e => { haptic("error"); tg.showAlert(e.message || "Ошибка"); };
+const ask = text => new Promise(res => tg.showConfirm(text, res));
+let toastT = 0;
+function toast(t) { const e = $("toast"); e.textContent = t; e.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(() => e.classList.remove("show"), 1800); haptic("success"); }
 
+// ---------- переходы между страницами ----------
+function placeInd() {
+  const t = document.querySelector(".tab.active"), tabs = $("tabs"); if (!t) return;
+  $("ind").style.width = t.offsetWidth + "px"; $("ind").style.transform = "translateX(" + t.offsetLeft + "px)";
+  tabs.scrollTo({ left: t.offsetLeft - (tabs.clientWidth - t.offsetWidth) / 2, behavior: REDUCE ? "auto" : "smooth" });
+}
+function stagger(box) {
+  if (REDUCE) return;
+  Array.from(box.children).slice(0, 9).forEach((c, i) => { c.style.animation = "none"; void c.offsetWidth; c.style.animation = "rise .42s " + i * 28 + "ms var(--ease) both"; });
+}
 function showTab(name) {
+  if (name === cur) return;
+  const id = ++swId, from = $("tab-" + cur), to = $("tab-" + name);
+  const dir = TABS.indexOf(name) > TABS.indexOf(cur) ? 1 : -1;
+  cur = name;
   document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x.dataset.tab === name));
-  document.querySelectorAll("section").forEach(s => s.classList.toggle("active", s.id === "tab-" + name));
+  placeInd();
+  from.style.setProperty("--dx", -dir * 16 + "px"); from.classList.add("leave");
+  setTimeout(() => {
+    if (id !== swId) return;
+    document.querySelectorAll("section").forEach(s => s.classList.remove("active", "leave", "enter"));
+    to.style.setProperty("--dx", dir * 16 + "px");
+    to.classList.add("active", "enter"); window.scrollTo(0, 0); void to.offsetWidth; to.classList.remove("enter");
+    stagger(to);
+  }, REDUCE ? 0 : 130);
   if (name === "favs") loadFavs();
   if (name === "admin") loadAdmin();
-  window.scrollTo(0, 0);
 }
 document.querySelectorAll(".tab").forEach(t => t.onclick = () => showTab(t.dataset.tab));
 
 function fillForm() {
   FIELDS.forEach(f => $(f).value = ME[f].join(", "));
-  $("price_min").value = ME.price_min ?? "";
-  $("price_max").value = ME.price_max ?? "";
-  $("profit_mode").checked = ME.profit_mode;
-  $("profit_rarity").value = ME.profit_rarity;
-  $("min_discount").value = ME.min_discount;
+  $("price_min").value = ME.price_min ?? ""; $("price_max").value = ME.price_max ?? "";
+  $("profit_mode").checked = ME.profit_mode; $("profit_rarity").value = ME.profit_rarity; $("min_discount").value = ME.min_discount;
 }
 
 async function load(fill = true) {
@@ -256,29 +298,24 @@ async function load(fill = true) {
   $("subbox").style.display = ME.paid_mode ? "" : "none";
   $("tab-admin-btn").style.display = ME.is_admin ? "" : "none";
   $("status").innerHTML = "";
-  const s = el("span", ME.active ? "on" : "off", ME.active ? (ME.sub_until ? "Подписка активна" : "Доступ открыт") : "Подписки нет");
-  $("status").append(s, document.createTextNode(ME.active && ME.sub_until ? " до " + new Date(ME.sub_until).toLocaleString()
-    : ME.active ? "" : " — оформи, чтобы получать уведомления"));
+  $("status").append(el("span", ME.active ? "on" : "off", ME.active ? (ME.sub_until ? "Подписка активна" : "Доступ открыт") : "Подписки нет"),
+    document.createTextNode(ME.active && ME.sub_until ? " до " + new Date(ME.sub_until).toLocaleString() : ""));
   $("state").innerHTML = "";
-  $("state").append(el("span", ME.enabled ? "on" : "off", ME.enabled ? "Работа идёт" : "Остановлено"),
-    document.createTextNode(ME.enabled ? " — уведомления включены" : " — уведомления выключены"));
+  $("state").append(el("span", ME.enabled ? "on" : "off", ME.enabled ? "Работа идёт" : "Остановлено"));
+  const f = ME.flags || {}, notes = [];
+  if (f.notify_paused) notes.push("Уведомления приостановлены админом");
+  if (f.relay_paused) notes.push("Отправка сообщений приостановлена админом");
+  $("banner").style.display = notes.length ? "" : "none"; $("banner").textContent = notes.join(" · ");
   const t = $("toggle");
-  t.textContent = ME.enabled ? "Завершить работу" : "Начать работу";
-  t.className = ME.enabled ? "stop" : "";
-  t.disabled = !ME.active;
-
+  t.textContent = ME.enabled ? "Завершить работу" : "Начать работу"; t.className = ME.enabled ? "stop" : ""; t.disabled = !ME.active;
   $("plans").innerHTML = "";
   Object.entries(ME.plans).forEach(([days, price]) => {
     const b = el("button", "alt", days + " дн. — " + price + " ⭐");
-    b.onclick = async () => {
-      try { const { link } = await api("/api/invoice", { days: +days }); tg.openInvoice(link, st => { if (st === "paid") load(false); }); }
-      catch (e) { fail(e); }
-    };
+    b.onclick = async () => { try { const { link } = await api("/api/invoice", { days: +days }); tg.openInvoice(link, st => { if (st === "paid") load(false); }); } catch (e) { fail(e); } };
     $("plans").appendChild(b);
   });
-  renderAccount();
-  renderAuto(fill);
-  if (fill) fillForm();
+  renderAccount(); renderAuto(fill); if (fill) fillForm();
+  requestAnimationFrame(placeInd);
 }
 
 // ---------- аккаунт ----------
@@ -292,38 +329,37 @@ function renderAccount() {
   const a = ME.account || { linked: false };
   $("acc_linked").style.display = a.linked ? "" : "none";
   $("acc_form").style.display = a.linked ? "none" : "";
+  const closed = !ME.link_ok ? "Привязка недоступна: админу нужно задать SESSION_KEY." : (ME.flags && ME.flags.link_closed ? "Привязка временно закрыта админом." : "");
+  $("acc_closed").style.display = closed ? "" : "none"; $("acc_closed").textContent = closed;
   const home = $("home_acc"); home.innerHTML = "";
   if (a.linked) {
     $("acc_name").textContent = a.name || "Аккаунт";
-    $("acc_meta").textContent = [a.username ? "@" + a.username : "", a.phone].filter(Boolean).join(" · ") + (a.connected ? "" : " · нет связи");
+    $("acc_meta").textContent = [a.username ? "@" + a.username : "", a.phone].filter(Boolean).join(" · ") + (a.connected ? "" : " · переподключается");
     home.append(el("span", "on", "Привязан"), document.createTextNode(" — " + (a.username ? "@" + a.username : a.name || "")));
   } else {
-    home.append(el("span", "off", "Не привязан"), document.createTextNode(" — без аккаунта сообщения не отправляются "));
+    home.append(el("span", "off", "Не привязан"));
     const b = el("button", "alt mini", "Привязать"); b.style.marginTop = "10px"; b.onclick = () => showTab("account");
     home.append(document.createElement("br"), b);
   }
 }
 $("acc_consent").onchange = () => { $("acc_send").disabled = !$("acc_consent").checked; };
 $("acc_send").onclick = async () => {
-  try { await api("/api/account/phone", { phone: $("acc_phone").value }); setStep("code"); $("acc_code").value = ""; }
-  catch (e) { fail(e); }
+  try { await api("/api/account/phone", { phone: $("acc_phone").value }); setStep("code"); $("acc_code").value = ""; } catch (e) { fail(e); }
 };
 $("acc_login").onclick = async () => {
   try {
     const r = await api("/api/account/code", { code: $("acc_code").value });
-    if (r.step === "password") setStep("password"); else { setStep("phone"); await load(false); tg.showAlert("Аккаунт привязан"); }
+    if (r.step === "password") setStep("password"); else { setStep("phone"); await load(false); toast("Аккаунт привязан"); }
   } catch (e) { fail(e); }
 };
 $("acc_pwbtn").onclick = async () => {
-  try { await api("/api/account/password", { password: $("acc_pw").value }); $("acc_pw").value = ""; setStep("phone"); await load(false); tg.showAlert("Аккаунт привязан"); }
+  try { await api("/api/account/password", { password: $("acc_pw").value }); $("acc_pw").value = ""; setStep("phone"); await load(false); toast("Аккаунт привязан"); }
   catch (e) { fail(e); }
 };
 $("acc_back").onclick = () => setStep("phone");
-$("acc_unlink").onclick = () => {
-  tg.showConfirm("Отвязать аккаунт? Сессия будет завершена, авто-режим остановится.", async ok => {
-    if (!ok) return;
-    try { await api("/api/account/unlink", {}); await load(false); } catch (e) { fail(e); }
-  });
+$("acc_unlink").onclick = async () => {
+  if (!await ask("Отвязать аккаунт? Сессия завершится, авто остановится.")) return;
+  try { await api("/api/account/unlink", {}); await load(false); toast("Отвязано"); } catch (e) { fail(e); }
 };
 
 // ---------- авто ----------
@@ -332,10 +368,11 @@ function renderAuto(fill) {
   if (!ME.auto_available) return;
   const names = { off: "выключен", on: "работает", paused: "на паузе" };
   const st = $("auto_status"); st.innerHTML = "";
-  st.append(document.createTextNode("Авто-режим: "), el("b", "", names[ME.auto_state]),
-    document.createTextNode(" · отправлено " + ME.auto_sent + " из " + ME.auto_limit));
-  if (!ME.account || !ME.account.linked) { st.append(document.createElement("br"), el("span", "off", "Сначала привяжи аккаунт (вкладка «Аккаунт»)")); }
-  else if (!ME.enabled) { st.append(document.createElement("br"), el("span", "off", "Работа остановлена — нажми «Начать работу» на главной")); }
+  st.append(document.createTextNode("Авто: "), el("b", "", names[ME.auto_state]), document.createTextNode(" · " + ME.auto_sent + " из " + ME.auto_limit));
+  const warn = t => st.append(document.createElement("br"), el("span", "off", t));
+  if (ME.flags && ME.flags.auto_paused) warn("Приостановлено админом");
+  else if (!ME.account || !ME.account.linked) warn("Сначала привяжи аккаунт");
+  else if (!ME.enabled) warn("Включи работу на главной");
   const ctl = $("auto_ctl"); ctl.innerHTML = "";
   const mk = (text, action, cls) => {
     const b = el("button", cls || "", text);
@@ -346,25 +383,21 @@ function renderAuto(fill) {
   else if (ME.auto_state === "paused") { mk("Продолжить", "resume"); mk("Стоп", "stop", "stop"); }
   else mk("Запустить на " + ME.auto_limit, "start");
   if (fill) {
-    $("auto_limit").max = ME.auto_max;
-    $("auto_gap").min = ME.auto_min_gap; $("auto_gap").max = ME.auto_max_gap;
+    $("auto_limit").max = ME.auto_max; $("auto_gap").min = ME.auto_min_gap; $("auto_gap").max = ME.auto_max_gap;
     $("auto_limit").value = ME.auto_limit; $("auto_gap").value = ME.auto_gap;
     const sel = $("auto_tpl"); sel.innerHTML = "";
     ME.templates.forEach((tx, i) => { const o = el("option", "", "Шаблон " + (i + 1) + ": " + tx); o.value = i; sel.appendChild(o); });
     const c = el("option", "", "Свой текст"); c.value = "custom"; sel.appendChild(c);
     sel.value = ME.auto_text ? "custom" : String(Math.min(ME.auto_tpl, ME.templates.length - 1));
-    $("auto_text").value = ME.auto_text;
-    $("auto_text").style.display = sel.value === "custom" ? "" : "none";
+    $("auto_text").value = ME.auto_text; $("auto_text").style.display = sel.value === "custom" ? "" : "none";
   }
 }
 $("auto_tpl").onchange = () => { $("auto_text").style.display = $("auto_tpl").value === "custom" ? "" : "none"; };
 $("auto_save").onclick = async () => {
   const custom = $("auto_tpl").value === "custom";
   try {
-    await api("/api/auto/settings", { limit: $("auto_limit").value, gap: $("auto_gap").value,
-      tpl: custom ? ME.auto_tpl : $("auto_tpl").value, text: custom ? $("auto_text").value : "" });
-    tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
-    tg.showAlert("Сохранено"); load();
+    await api("/api/auto/settings", { limit: $("auto_limit").value, gap: $("auto_gap").value, tpl: custom ? ME.auto_tpl : $("auto_tpl").value, text: custom ? $("auto_text").value : "" });
+    toast("Сохранено"); load();
   } catch (e) { fail(e); }
 };
 
@@ -372,141 +405,181 @@ $("auto_save").onclick = async () => {
 async function loadFavs() {
   const { items } = await api("/api/favorites");
   const box = $("favs"); box.innerHTML = "";
-  if (!items.length) { box.append(el("div", "status", "Пока пусто. Жми «⭐ В избранное» под уведомлением.")); return; }
+  if (!items.length) { box.append(el("div", "status", "Пусто. Жми «⭐ В избранное» под уведомлением.")); stagger(box); return; }
   items.forEach(it => {
-    const row = el("div", "card line");
-    const info = el("div"); info.style.flex = "1";
+    const row = el("div", "card line"), info = el("div"); info.style.flex = "1";
     info.append(el("b", "", it.collection + " #" + it.num), el("span", "", [it.model, it.backdrop].filter(Boolean).join(" · ")));
     const open = el("button", "mini", "Открыть"); open.onclick = () => tg.openTelegramLink("https://t.me/nft/" + it.slug);
-    const del = el("button", "mini alt", "✕");
-    del.onclick = async () => { await api("/api/favorites/remove", { slug: it.slug }); loadFavs(); };
+    const del = el("button", "mini alt", "✕"); del.onclick = async () => { await api("/api/favorites/remove", { slug: it.slug }); loadFavs(); };
     row.append(info, open, del); box.appendChild(row);
   });
+  stagger(box);
 }
 
 // ---------- админ ----------
+document.querySelectorAll("#admin_seg button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("#admin_seg button").forEach(x => x.classList.toggle("on", x === b));
+  document.querySelectorAll(".sub").forEach(s => s.classList.toggle("active", s.id === "sub-" + b.dataset.sub));
+});
+const FLAGS = [["notify_paused", "Уведомления идут"], ["relay_paused", "Сообщения владельцам разрешены"],
+               ["auto_paused", "Авто-режим разрешён"], ["link_closed", "Привязка аккаунтов открыта"]];
+const SET_LABEL = { notify_paused: "уведомления", relay_paused: "сообщения", auto_paused: "авто", link_closed: "привязка",
+                    relay_daily_limit: "диалогов в сутки", relay_min_gap: "пауза отправки", auto_max: "авто за запуск" };
+const ACT_LABEL = { stop_work: "остановил работу", stop_auto: "остановил авто", reset_auto: "сбросил счётчик авто", unlink: "отвязал аккаунт", message: "написал" };
+function fmtLog(w) {
+  const [k, a, b] = w.split(":");
+  if (k === "access") return "доступ " + a + ": " + (b === "on" ? "открыт" : "закрыт");
+  if (k === "autook") return "авто для " + a + ": " + (b === "on" ? "разрешено" : "запрещено");
+  if (k === "set") return (SET_LABEL[a] || a) + ": " + b;
+  if (k === "notify") return "уведомления: " + (a === "pause" ? "пауза" : "возобновлены");
+  if (k === "broadcast") return "объявление: " + a + " получателей";
+  if (k === "user") return a + ": " + (b && b.startsWith("limit=") ? "лимит " + b.slice(6) : ACT_LABEL[b] || b);
+  return w;
+}
 async function loadAdmin() {
   if (!ME || !ME.is_admin) return;
   try {
-    const d = await api("/api/admin/stats");
+    const [d, c] = await Promise.all([api("/api/admin/stats"), api("/api/admin/control")]);
     const g = $("admin_totals"); g.innerHTML = "";
     const stat = (label, value) => { const s = el("div", "stat"); s.append(el("span", "", label), el("b", "", value)); g.appendChild(s); };
-    stat("Подарков", d.gifts[0] + " / " + d.gifts[1]);
-    stat("Уведомлений", d.notify[0] + " / " + d.notify[1]);
-    stat("Сообщений", d.msgs[0] + " / " + d.msgs[1]);
-    stat("Из них авто", d.auto[0] + " / " + d.auto[1]);
-    stat("Ответов", d.replies[0] + " / " + d.replies[1]);
-    stat("Диалогов", d.threads[0] + " · ответили " + d.threads[1]);
-    stat("С доступом", d.with_access + " · работают " + d.working);
-    stat("Аккаунтов", d.linked + " · авто " + d.auto_on);
-    const box = $("admin_users"); box.innerHTML = "";
-    d.users.forEach(u => {
-      const row = el("div", "card urow");
-      const top = el("div", "line");
-      top.append(el("b", "", (u.username ? "@" + u.username : "—") + " · " + u.id),
-                 el("span", u.enabled ? "on" : "", (u.enabled ? "работает" : "стоп") + (u.linked ? " · аккаунт" : "")));
-      row.append(top, el("span", "", "ув. " + u.n[0] + "/" + u.n[1] + " · сообщ. " + u.m[0] + "/" + u.m[1] +
-        " (авто " + u.a[0] + "/" + u.a[1] + ") · ответов " + u.r[0] + "/" + u.r[1] + " · был " + ago(u.seen) + " назад"));
-      row.onclick = () => showUser(u.id);
-      box.appendChild(row);
-    });
-    if (!d.users.length) box.append(el("div", "status", "Пока никого."));
+    stat("Подарков", d.gifts[0] + " / " + d.gifts[1]); stat("Уведомлений", d.notify[0] + " / " + d.notify[1]);
+    stat("Сообщений", d.msgs[0] + " / " + d.msgs[1]); stat("Из них авто", d.auto[0] + " / " + d.auto[1]);
+    stat("Ответов", d.replies[0] + " / " + d.replies[1]); stat("Диалогов", d.threads[0] + " · ответили " + d.threads[1]);
+    stat("С доступом", d.with_access + " · работают " + d.working); stat("Аккаунтов", d.linked + " · авто " + d.auto_on);
+    $("admin_health").textContent = c.health || "—";
+    renderPeople(d); renderControl(c);
   } catch (e) { fail(e); }
+}
+function renderPeople(d) {
+  const box = $("admin_users"); box.innerHTML = "";
+  d.users.forEach(u => {
+    const row = el("div", "card urow"), top = el("div", "line");
+    top.append(el("b", "", (u.username ? "@" + u.username : "—") + " · " + u.id), el("span", u.enabled ? "on" : "", (u.enabled ? "работает" : "стоп") + (u.linked ? " · акк." : "")));
+    row.append(top, el("span", "", "ув. " + u.n[0] + "/" + u.n[1] + " · сообщ. " + u.m[0] + "/" + u.m[1] + " (авто " + u.a[0] + ") · ответов " + u.r[0] + " · был " + ago(u.seen) + " назад"));
+    row.onclick = () => showUser(u.id); box.appendChild(row);
+  });
+  if (!d.users.length) box.append(el("div", "status", "Пока никого."));
+  stagger(box);
+}
+async function act(id, action, extra) {
+  try { await api("/api/admin/user_action", Object.assign({ id, action }, extra || {})); toast("Готово"); await showUser(id); loadAdmin(); } catch (e) { fail(e); }
 }
 async function showUser(id) {
   try {
-    const u = await api("/api/admin/user?id=" + id);
-    const box = $("admin_detail"); box.innerHTML = "";
+    const u = await api("/api/admin/user?id=" + id), box = $("admin_detail"); box.innerHTML = "";
     box.append(el("h2", "", "Человек"));
     const head = el("div", "card");
     head.append(el("b", "", (u.username ? "@" + u.username : "—") + " · " + u.id),
-      el("span", "", "доступ: " + u.access + " · работа: " + (u.enabled ? "вкл" : "выкл") + " · режим выгоды: " + (u.profit_mode ? "вкл" : "выкл")),
-      document.createElement("br"),
-      el("span", "", "аккаунт: " + (u.linked ? "привязан " + (u.account || "") : "не привязан") +
-        " · авто: " + (u.auto_ok ? "разрешено" : "нет") + " (" + u.auto_state + ", " + u.auto_sent + " из " + u.auto_limit + ")"),
-      document.createElement("br"), el("span", "", "был: " + ago(u.seen) + " назад"));
+      el("span", "", "доступ: " + u.access + " · работа: " + (u.enabled ? "вкл" : "выкл")), document.createElement("br"),
+      el("span", "", "аккаунт: " + (u.linked ? "привязан " + (u.account || "") : "нет") + " · авто: " + (u.auto_ok ? "разрешено" : "нет") + " (" + u.auto_state + ", " + u.auto_sent + " из " + u.auto_limit + ")"),
+      document.createElement("br"), el("span", "", "лимит в сутки: " + (u.daily_limit ?? "общий") + " · был " + ago(u.seen) + " назад"));
     box.appendChild(head);
-    const tbl = el("table", "tbl"); tbl.append(Object.assign(el("tr"), {}));
-    const th = el("tr"); ["", "24 ч", "7 дн", "всего"].forEach((x, i) => { const c = el("td", "", x); if (i) c.style.color = "#7d7d7d"; th.appendChild(c); }); tbl.appendChild(th);
+    const tbl = el("table", "tbl");
     u.counts.filter(c => c.all > 0 || c.d7 > 0).forEach(c => { const r = el("tr"); [c.label, c.d1, c.d7, c.all].forEach(x => r.appendChild(el("td", "", String(x)))); tbl.appendChild(r); });
     box.appendChild(tbl);
     if (u.threads.length) {
-      box.append(el("h2", "", "Последние диалоги"));
+      box.append(el("h2", "", "Диалоги"));
       u.threads.forEach(t => { const c = el("div", "card line"); c.append(el("b", "", t.title), el("span", t.replied ? "on" : "", (t.replied ? "ответил" : "ждём") + " · " + ago(t.age))); box.appendChild(c); });
     }
+    box.append(el("h2", "", "Управление"));
+    const msg = el("textarea"); msg.rows = 2; msg.maxLength = 1000; msg.placeholder = "Сообщение этому человеку";
+    const send = el("button", "alt", "Отправить сообщение");
+    send.onclick = () => { if (msg.value.trim()) act(u.id, "message", { text: msg.value }); };
+    box.append(msg, send);
     if (!u.admin) {
-      const a1 = el("button", "stop", "Закрыть доступ");
-      a1.onclick = () => tg.showConfirm("Закрыть доступ этому человеку?", async ok => { if (ok) { await api("/api/admin/access", { id: u.id, allowed: false }); $("admin_detail").innerHTML = ""; loadAdmin(); } });
-      const a2 = el("button", "alt", u.auto_ok ? "Запретить авто" : "Разрешить авто");
-      a2.onclick = async () => { await api("/api/admin/autook", { id: u.id, ok: !u.auto_ok }); showUser(u.id); loadAdmin(); };
-      box.append(a2, a1);
+      const lim = el("input"); lim.type = "number"; lim.min = 0; lim.max = 200; lim.placeholder = "Лимит диалогов в сутки"; lim.style.marginTop = "14px";
+      const row = el("div", "row"), ok = el("button", "alt", "Применить"), rs = el("button", "alt", "Общий");
+      ok.onclick = () => { if (lim.value !== "") act(u.id, "limit", { value: +lim.value }); }; rs.onclick = () => act(u.id, "limit", { value: null });
+      row.append(ok, rs); box.append(lim, row);
+      const b = (text, cls, fn) => { const x = el("button", cls, text); x.onclick = fn; box.appendChild(x); };
+      b("Остановить работу", "alt", () => act(u.id, "stop_work"));
+      b("Остановить авто", "alt", () => act(u.id, "stop_auto"));
+      b("Сбросить счётчик авто", "alt", () => act(u.id, "reset_auto"));
+      b(u.auto_ok ? "Запретить авто" : "Разрешить авто", "alt", async () => { await api("/api/admin/autook", { id: u.id, ok: !u.auto_ok }); showUser(u.id); loadAdmin(); });
+      if (u.linked) b("Отвязать аккаунт", "stop", async () => { if (await ask("Отвязать аккаунт этого человека?")) act(u.id, "unlink"); });
+      b("Закрыть доступ", "stop", async () => { if (await ask("Закрыть доступ?")) { await api("/api/admin/access", { id: u.id, allowed: false }); box.innerHTML = ""; loadAdmin(); } });
     }
-    box.scrollIntoView({ behavior: "smooth" });
+    stagger(box); box.scrollIntoView({ behavior: REDUCE ? "auto" : "smooth" });
   } catch (e) { fail(e); }
 }
+function renderControl(c) {
+  const fl = $("ctl_flags"); fl.innerHTML = "";
+  FLAGS.forEach(([key, label]) => {
+    const row = el("div", "card line"), sw = el("input", "sw"); sw.type = "checkbox"; sw.checked = !c.settings[key];
+    sw.onchange = async () => { try { await api("/api/admin/setting", { key, value: !sw.checked }); toast(label + ": " + (sw.checked ? "да" : "нет")); } catch (e) { sw.checked = !sw.checked; fail(e); } };
+    row.append(el("span", "", label), sw); row.firstChild.style.color = "#cfcfcf"; fl.appendChild(row);
+  });
+  $("ctl_note").textContent = c.link_ok ? "" : "Привязка новых аккаунтов выключена: " + c.link_problem + ".";
+  ["relay_daily_limit", "relay_min_gap", "auto_max"].forEach(k => $("set_" + k).value = c.settings[k]);
+  const ac = $("ctl_accounts"); ac.innerHTML = "";
+  if (!c.accounts.length) ac.append(el("div", "status", "Привязанных нет."));
+  c.accounts.forEach(a => {
+    const row = el("div", "card line"), info = el("div"); info.style.flex = "1";
+    const state = a.paused ? "пауза " + Math.ceil(a.paused / 60) + " мин (лимит Telegram)" : a.connected ? "на связи" : "нет связи" + (a.retry ? ", повтор через " + a.retry + " с" : "");
+    info.append(el("b", "", (a.name ? "@" + a.name.replace(/^@/, "") : "—") + " · " + a.id), el("span", a.connected && !a.paused ? "on" : "off", state));
+    const un = el("button", "mini stop", "Отвязать");
+    un.onclick = async () => { if (await ask("Отвязать аккаунт " + a.id + "?")) act(a.id, "unlink"); };
+    row.append(info, un); ac.appendChild(row);
+  });
+  const lg = $("admin_log"); lg.innerHTML = "";
+  if (!c.log.length) lg.append(el("div", "status", "Действий пока нет."));
+  c.log.forEach(r => { const row = el("div", "card line"); row.append(el("span", "", fmtLog(r.what)), el("span", "", ago(r.age) + " назад")); lg.appendChild(row); });
+}
+$("ctl_save").onclick = async () => {
+  try {
+    for (const k of ["relay_daily_limit", "relay_min_gap", "auto_max"]) await api("/api/admin/setting", { key: k, value: +$("set_" + k).value });
+    toast("Лимиты сохранены"); loadAdmin();
+  } catch (e) { fail(e); }
+};
+$("bc_send").onclick = async () => {
+  const text = $("bc_text").value.trim(); if (!text) return;
+  if (!await ask("Отправить всем, у кого есть доступ?")) return;
+  try { const r = await api("/api/admin/broadcast", { text }); $("bc_text").value = ""; toast("Отправляю: " + r.queued); loadAdmin(); } catch (e) { fail(e); }
+};
 $("admin_refresh").onclick = loadAdmin;
 
 // ---------- фильтры ----------
 const PRESETS = {
   profit: () => { $("profit_mode").checked = true; $("profit_rarity").value = 1; $("min_discount").value = 0; },
-  rare:   () => { $("profit_mode").checked = true; $("profit_rarity").value = 0.5; },
-  reset:  () => {
-    FIELDS.concat(["price_min", "price_max"]).forEach(i => $(i).value = "");
-    $("profit_mode").checked = false; $("profit_rarity").value = 1; $("min_discount").value = 0;
-  },
+  rare: () => { $("profit_mode").checked = true; $("profit_rarity").value = 0.5; },
+  reset: () => { FIELDS.concat(["price_min", "price_max"]).forEach(i => $(i).value = ""); $("profit_mode").checked = false; $("profit_rarity").value = 1; $("min_discount").value = 0; },
 };
-document.querySelectorAll("[data-preset]").forEach(b => b.onclick = () => {
-  PRESETS[b.dataset.preset](); tg.HapticFeedback && tg.HapticFeedback.impactOccurred("light");
-});
-$("toggle").onclick = async () => {
-  try { await api("/api/toggle", { enabled: !ME.enabled }); } catch (e) { tg.showAlert("Нет доступа"); }
-  load(false);
-};
+document.querySelectorAll("[data-preset]").forEach(b => b.onclick = () => { PRESETS[b.dataset.preset](); tg.HapticFeedback && tg.HapticFeedback.impactOccurred("light"); toast("Заполнено, нажми «Сохранить»"); });
+$("toggle").onclick = async () => { try { await api("/api/toggle", { enabled: !ME.enabled }); } catch (e) { tg.showAlert("Нет доступа"); } load(false); };
 $("save").onclick = async () => {
   try {
     await api("/api/filters", {
       collections: $("collections").value, models: $("models").value, backdrops: $("backdrops").value,
-      price_min: $("price_min").value, price_max: $("price_max").value,
-      profit_mode: $("profit_mode").checked, profit_rarity: $("profit_rarity").value,
-      exclude_collections: $("exclude_collections").value, exclude_models: $("exclude_models").value,
-      exclude_backdrops: $("exclude_backdrops").value, min_discount: $("min_discount").value,
+      price_min: $("price_min").value, price_max: $("price_max").value, profit_mode: $("profit_mode").checked, profit_rarity: $("profit_rarity").value,
+      exclude_collections: $("exclude_collections").value, exclude_models: $("exclude_models").value, exclude_backdrops: $("exclude_backdrops").value, min_discount: $("min_discount").value,
     });
-    tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success");
-    tg.showAlert("Сохранено"); load();
+    toast("Сохранено"); load();
   } catch (e) { fail(e); }
 };
 
-load().catch(e => {
-  $("state").textContent = e.status === 403 ? "Приватный бот: доступ закрыт. Напиши владельцу." : "Открой приложение из бота";
-});
+load().catch(e => { $("state").textContent = e.status === 403 ? "Приватный бот: доступ закрыт. Напиши владельцу." : "Открой приложение из бота"; });
+window.addEventListener("resize", placeInd);
 
 // ---------- фон: маленькие белые точки падают ----------
 (function () {
   const c = $("dots"), x = c.getContext && c.getContext("2d");
   if (!x) return;
-  const reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  let w = 0, h = 0, dots = [];
-  const mk = init => ({ x: Math.random() * w, y: init ? Math.random() * h : -4, r: .5 + Math.random() * 1.1,
-                        v: .22 + Math.random() * .6, a: .25 + Math.random() * .6, p: Math.random() * 6.28, s: .3 + Math.random() * .8 });
+  let w = 0, h = 0, dots = [], last = 0, raf = 0;
+  const mk = init => ({ x: Math.random() * w, y: init ? Math.random() * h : -4, r: .5 + Math.random() * 1.1, v: 14 + Math.random() * 36, a: .25 + Math.random() * .6, p: Math.random() * 6.28, s: .3 + Math.random() * .8 });
   function size() {
     w = window.innerWidth; h = window.innerHeight; c.width = w * dpr; c.height = h * dpr; x.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const n = Math.round(Math.min(110, Math.max(40, w * h / 9000)));
-    while (dots.length < n) dots.push(mk(true)); dots.length = n;
+    const n = Math.round(Math.min(110, Math.max(40, w * h / 9000))); while (dots.length < n) dots.push(mk(true)); dots.length = n;
   }
-  function draw() {
-    x.clearRect(0, 0, w, h); x.fillStyle = "#fff";
-    for (const d of dots) { x.globalAlpha = d.a; x.beginPath(); x.arc(d.x, d.y, d.r, 0, 6.283); x.fill(); }
-  }
+  function draw() { x.clearRect(0, 0, w, h); x.fillStyle = "#fff"; for (const d of dots) { x.globalAlpha = d.a; x.beginPath(); x.arc(d.x, d.y, d.r, 0, 6.283); x.fill(); } }
   function tick(t) {
-    for (const d of dots) {
-      d.y += d.v; d.x += Math.sin(t / 1800 * d.s + d.p) * .22;
-      if (d.y > h + 4) { Object.assign(d, mk(false)); d.x = Math.random() * w; }
-    }
-    draw(); requestAnimationFrame(tick);
+    const dt = Math.min(.05, (t - last) / 1000 || .016); last = t;   // движение по времени: одинаково плавно при любой частоте кадров
+    for (const d of dots) { d.y += d.v * dt; d.x += Math.sin(t / 1800 * d.s + d.p) * 9 * dt; if (d.y > h + 4) { Object.assign(d, mk(false)); d.x = Math.random() * w; } }
+    draw(); raf = document.hidden ? 0 : requestAnimationFrame(tick);
   }
-  size(); window.addEventListener("resize", () => { size(); if (reduce) draw(); });
-  if (reduce) draw(); else requestAnimationFrame(tick);
+  size(); window.addEventListener("resize", () => { size(); if (REDUCE) draw(); });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && !raf && !REDUCE) { last = 0; raf = requestAnimationFrame(tick); } });
+  if (REDUCE) draw(); else raf = requestAnimationFrame(tick);
 })();
 </script>
 </body>

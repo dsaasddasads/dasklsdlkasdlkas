@@ -4,50 +4,88 @@
 С этого аккаунта бот пишет владельцам подарков и принимает их ответы.
 
 Безопасность:
-  * сессия хранится в базе в зашифрованном виде (Fernet, ключ из SESSION_KEY);
-  * бот пересылает только ответы тех владельцев, кому человек писал сам, остальные чаты не трогает;
-  * «Отвязать» завершает сессию на стороне Telegram (аккаунт выходит из устройства «бот»);
-  * лимит попыток входа: 5 в час на человека.
+  * сессия хранится в базе только в зашифрованном виде (Fernet, ключ SESSION_KEY из переменных Railway);
+    без SESSION_KEY (не короче 16 символов) новые аккаунты привязать нельзя;
+  * старые привязки, зашифрованные прежним способом (ключ из BOT_TOKEN), при запуске перешифровываются на SESSION_KEY;
+  * номер телефона в базе хранится только в замаскированном виде, код и пароль 2FA нигде не сохраняются;
+  * один Telegram-аккаунт можно привязать только к одному пользователю бота;
+  * «Отвязать» завершает сессию на стороне Telegram; админ тоже может отвязать аккаунт;
+  * потерянные соединения восстанавливаются сами, сброшенные сессии отвязываются с уведомлением человеку;
+  * бот пересылает только ответы владельцев, которым человек писал сам, остальные чаты не трогает;
+  * лимит попыток входа: LINK_ATTEMPTS в час на человека.
 """
 import asyncio
 import base64
 import hashlib
 import html
 import logging
-import os
 import time
 
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from telethon import TelegramClient, events
 from telethon.errors import (
-    ApiIdInvalidError, FloodWaitError, PasswordHashInvalidError, PhoneCodeEmptyError,
-    PhoneCodeExpiredError, PhoneCodeInvalidError, PhoneNumberBannedError, PhoneNumberFloodError,
-    PhoneNumberInvalidError, SessionPasswordNeededError,
+    ApiIdInvalidError, AuthKeyDuplicatedError, AuthKeyUnregisteredError, FloodWaitError,
+    PasswordHashInvalidError, PhoneCodeEmptyError, PhoneCodeExpiredError, PhoneCodeInvalidError,
+    PhoneNumberBannedError, PhoneNumberFloodError, PhoneNumberInvalidError, SessionExpiredError,
+    SessionPasswordNeededError, SessionRevokedError, UserDeactivatedBanError, UserDeactivatedError,
 )
 from telethon.sessions import StringSession
 
-from . import config, db
+from . import config, db, settings
 
 log = logging.getLogger("accounts")
 
-_secret = os.getenv("SESSION_KEY") or ("gift-track|" + config.BOT_TOKEN)
-_fernet = Fernet(base64.urlsafe_b64encode(hashlib.sha256(_secret.encode()).digest()))
+DEAD = (AuthKeyDuplicatedError, AuthKeyUnregisteredError, SessionRevokedError, SessionExpiredError,
+        UserDeactivatedError, UserDeactivatedBanError)
 
 
-def encrypt(s: str) -> str:
-    return _fernet.encrypt(s.encode()).decode()
+def _fernet(secret: str) -> Fernet:
+    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest()))
 
 
-def decrypt(s: str) -> str:
-    return _fernet.decrypt(s.encode()).decode()
+_PRIMARY = _fernet(config.SESSION_KEY) if config.SESSION_KEY else None
+_LEGACY = _fernet("gift-track|" + config.BOT_TOKEN)  # так шифровали раньше, пока SESSION_KEY не был задан
+
+
+def link_ok() -> bool:
+    """Можно ли привязывать новые аккаунты: нужен нормальный ключ шифрования."""
+    return bool(config.SESSION_KEY) and len(config.SESSION_KEY) >= 16
+
+
+def problem() -> str | None:
+    if not config.SESSION_KEY:
+        return "не задана переменная SESSION_KEY"
+    if len(config.SESSION_KEY) < 16:
+        return "SESSION_KEY слишком короткий (нужно не менее 16 символов)"
+    return None
 
 
 class LinkError(Exception):
     def __init__(self, text: str):
         super().__init__(text)
         self.text = text
+
+
+def encrypt(s: str) -> str:
+    if _PRIMARY is None:
+        raise LinkError("Привязка недоступна: админу нужно задать SESSION_KEY.")
+    return _PRIMARY.encrypt(s.encode()).decode()
+
+
+def decrypt(s: str) -> tuple[str, bool]:
+    """(сессия, расшифровано старым ключом)."""
+    if _PRIMARY is not None:
+        try:
+            return _PRIMARY.decrypt(s.encode()).decode(), False
+        except InvalidToken:
+            pass
+    return _LEGACY.decrypt(s.encode()).decode(), True
+
+
+def mask_phone(phone: str) -> str:
+    return phone[:4] + "•" * max(0, len(phone) - 6) + phone[-2:] if len(phone) > 6 else phone
 
 
 ERRORS = {
@@ -67,18 +105,27 @@ def explain(e: Exception) -> str:
     if isinstance(e, LinkError):
         return e.text
     if isinstance(e, FloodWaitError):
-        return f"Слишком много попыток. Подожди {e.seconds} с."
+        return f"Слишком много попыток. Подожди {max(1, e.seconds // 60)} мин."
     for cls, text in ERRORS.items():
         if isinstance(e, cls):
             return text
-    return f"Не удалось: {e}"
+    log.warning("link error: %s", type(e).__name__)
+    return "Не удалось войти. Попробуй ещё раз."
+
+
+def _new_client(session: str = "") -> TelegramClient:
+    return TelegramClient(StringSession(session), config.API_ID, config.API_HASH,
+                          device_model="Gift Track", system_version="Linux", app_version="1.0")
 
 
 class Accounts:
     def __init__(self) -> None:
         self.clients: dict[int, TelegramClient] = {}
+        self.linked: set[int] = set()
         self.pending: dict[int, dict] = {}
         self.attempts: dict[int, list[float]] = {}
+        self._locks: dict[int, asyncio.Lock] = {}
+        self._retry: dict[int, float] = {}
         self.bot: Bot | None = None
 
     def bind_bot(self, bot: Bot) -> None:
@@ -87,26 +134,104 @@ class Accounts:
     def get(self, uid: int) -> TelegramClient | None:
         return self.clients.get(uid)
 
-    # ---------- запуск и отзыв ----------
-    async def start(self) -> None:
-        """Подключает все сохранённые аккаунты."""
-        for row in await db.list_accounts():
-            uid = row["user_id"]
-            try:
-                client = TelegramClient(StringSession(decrypt(row["session"])), config.API_ID, config.API_HASH)
-                await client.connect()
-                if not await client.is_user_authorized():
-                    await client.disconnect()
-                    await self.drop(uid)  # сессию отозвали в Telegram
-                    continue
-                self._attach(uid, client)
-                self.clients[uid] = client
-            except Exception as e:
-                log.warning("аккаунт %s не подключён: %s", uid, e)
-            await asyncio.sleep(0.5)
-        log.info("привязанных аккаунтов подключено: %d", len(self.clients))
+    def has(self, uid: int) -> bool:
+        """Аккаунт привязан (даже если прямо сейчас переподключается)."""
+        return uid in self.linked
 
-    async def drop(self, uid: int, notify: bool = True) -> None:
+    def _lock(self, uid: int) -> asyncio.Lock:
+        return self._locks.setdefault(uid, asyncio.Lock())
+
+    # ---------- запуск, восстановление и отзыв ----------
+    async def start(self) -> None:
+        """Подключает все сохранённые аккаунты, переводит их на новый ключ и маскирует телефоны."""
+        rows = await db.list_accounts()
+        self.linked = {r["user_id"] for r in rows}
+        if rows and _PRIMARY is None:
+            log.warning("Привязанные аккаунты зашифрованы ключом из BOT_TOKEN. Задай SESSION_KEY (%s), "
+                        "после этого они перешифруются автоматически.", problem())
+        for row in rows:
+            await self._migrate(row)
+            await self.ensure(row["user_id"])
+            await asyncio.sleep(0.5)
+        log.info("привязанных аккаунтов подключено: %d из %d", len(self.clients), len(rows))
+
+    async def _migrate(self, row: dict) -> None:
+        """Старый ключ -> SESSION_KEY, открытый телефон -> маска."""
+        try:
+            session, legacy = decrypt(row["session"])
+        except (InvalidToken, ValueError):
+            return  # ensure() разберётся и отвяжет
+        phone = row.get("phone") or ""
+        need_mask = bool(phone) and "•" not in phone
+        if (legacy and _PRIMARY is not None) or need_mask:
+            await db.update_account_session(
+                row["user_id"], encrypt(session) if _PRIMARY is not None else row["session"],
+                mask_phone(phone) if need_mask else phone)
+
+    async def ensure(self, uid: int) -> TelegramClient | None:
+        """Подключённый клиент человека. Сам переподключается; None - если аккаунта нет или он не отвечает."""
+        async with self._lock(uid):
+            c = self.clients.get(uid)
+            if c is not None:
+                if c.is_connected():
+                    return c
+                try:
+                    await c.connect()
+                    return c
+                except Exception as e:
+                    self._retry[uid] = time.time() + 120
+                    log.warning("account %s reconnect failed: %s", uid, type(e).__name__)
+                    return None
+            row = await db.get_account(uid)
+            if not row:
+                self.linked.discard(uid)
+                return None
+            self.linked.add(uid)
+            try:
+                session, _ = decrypt(row["session"])
+            except (InvalidToken, ValueError):
+                await self.drop(uid, reason="не удалось расшифровать сессию (изменился SESSION_KEY)")
+                return None
+            c = _new_client(session)
+            try:
+                await c.connect()
+                if not await c.is_user_authorized():
+                    await c.disconnect()
+                    await self.drop(uid, reason="Telegram сбросил сессию")
+                    return None
+            except DEAD as e:
+                await self.drop(uid, reason=f"Telegram сбросил сессию ({type(e).__name__})")
+                return None
+            except Exception as e:  # сеть - keepalive попробует снова
+                self._retry[uid] = time.time() + 120
+                log.warning("account %s connect failed: %s", uid, type(e).__name__)
+                try:
+                    await c.disconnect()
+                except Exception:
+                    pass
+                return None
+            self._attach(uid, c)
+            self.clients[uid] = c
+            self._retry.pop(uid, None)
+            return c
+
+    async def keepalive(self) -> None:
+        """Раз в минуту поднимает отвалившиеся аккаунты."""
+        while True:
+            await asyncio.sleep(60)
+            try:
+                for row in await db.list_accounts():
+                    uid = row["user_id"]
+                    c = self.clients.get(uid)
+                    if c is not None and c.is_connected():
+                        continue
+                    if time.time() < self._retry.get(uid, 0):
+                        continue
+                    await self.ensure(uid)
+            except Exception:
+                log.exception("keepalive failed")
+
+    async def drop(self, uid: int, notify: bool = True, reason: str = "Telegram сбросил сессию") -> None:
         """Сессия больше не работает: удаляем привязку и сообщаем человеку."""
         c = self.clients.pop(uid, None)
         if c:
@@ -115,16 +240,19 @@ class Accounts:
             except Exception:
                 pass
         await db.delete_account(uid)
+        self.linked.discard(uid)
+        log.warning("account %s dropped: %s", uid, reason)
         if notify and self.bot:
-            try:
-                await self.bot.send_message(
-                    uid, "⚠️ Сессия привязанного аккаунта сброшена. Привяжи аккаунт заново: "
-                         "приложение → вкладка «Аккаунт».")
-            except Exception:
-                pass
+            await self._tell(uid, f"⚠️ Аккаунт отвязан: {reason}. Привяжи заново: приложение → «Аккаунт».")
 
-    async def unlink(self, uid: int) -> None:
-        c = self.clients.pop(uid, None)
+    async def _tell(self, uid: int, text: str) -> None:
+        try:
+            await self.bot.send_message(uid, text)
+        except Exception:
+            pass
+
+    async def unlink(self, uid: int, by_admin: bool = False) -> None:
+        c = self.clients.pop(uid, None) or await self._temp_client(uid)
         if c:
             try:
                 await c.log_out()  # завершает сессию на стороне Telegram
@@ -134,7 +262,22 @@ class Accounts:
                 except Exception:
                     pass
         await db.delete_account(uid)
+        self.linked.discard(uid)
         await db.log_event(uid, "account_unlink")
+        if by_admin and self.bot:
+            await self._tell(uid, "Админ отвязал твой аккаунт. Сессия завершена.")
+
+    async def _temp_client(self, uid: int) -> TelegramClient | None:
+        """Клиент для отвязки аккаунта, который сейчас не подключён."""
+        row = await db.get_account(uid)
+        if not row:
+            return None
+        try:
+            c = _new_client(decrypt(row["session"])[0])
+            await c.connect()
+            return c
+        except Exception:
+            return None
 
     # ---------- входящие ответы ----------
     def _attach(self, uid: int, client: TelegramClient) -> None:
@@ -173,7 +316,7 @@ class Accounts:
     def _rate(self, uid: int) -> None:
         now = time.time()
         lst = [t for t in self.attempts.get(uid, []) if now - t < 3600]
-        if len(lst) >= 5:
+        if len(lst) >= config.LINK_ATTEMPTS:
             raise LinkError("Слишком много попыток входа. Попробуй через час.")
         lst.append(now)
         self.attempts[uid] = lst
@@ -193,12 +336,16 @@ class Accounts:
         return p
 
     async def link_phone(self, uid: int, phone: str) -> None:
+        if settings.get_bool("link_closed"):
+            raise LinkError("Привязка аккаунтов временно закрыта админом.")
+        if not link_ok():
+            raise LinkError("Привязка недоступна: админу нужно задать SESSION_KEY (не короче 16 символов).")
         digits = "".join(ch for ch in phone if ch.isdigit())
-        if len(digits) < 8:
+        if not 8 <= len(digits) <= 15:
             raise LinkError("Неверный номер телефона. Введи в формате +380...")
         self._rate(uid)
         await self.cancel(uid)
-        client = TelegramClient(StringSession(), config.API_ID, config.API_HASH)
+        client = _new_client()
         await client.connect()
         try:
             sent = await client.send_code_request("+" + digits)
@@ -227,6 +374,14 @@ class Accounts:
     async def _finish(self, uid: int, p: dict) -> None:
         client = p["client"]
         me = await client.get_me()
+        owner = await db.account_owner(me.id)
+        if owner is not None and owner != uid:
+            try:
+                await client.log_out()  # чужой привязанный аккаунт не берём
+            except Exception:
+                pass
+            self.pending.pop(uid, None)
+            raise LinkError("Этот аккаунт уже привязан к другому пользователю.")
         name = " ".join(x for x in (me.first_name, me.last_name) if x)
         old = self.clients.pop(uid, None)
         if old is not None and old is not client:
@@ -234,20 +389,30 @@ class Accounts:
                 await old.log_out()  # прежнюю привязку отзываем
             except Exception:
                 pass
-        await db.save_account(uid, encrypt(client.session.save()), p["phone"], me.id, name, me.username)
+        await db.save_account(uid, encrypt(client.session.save()), mask_phone(p["phone"]), me.id, name, me.username)
         self.pending.pop(uid, None)
         self._attach(uid, client)
         self.clients[uid] = client
+        self.linked.add(uid)
+        self._retry.pop(uid, None)
         await db.log_event(uid, "account_link")
 
     async def info(self, uid: int) -> dict:
         row = await db.get_account(uid)
         if not row:
             return {"linked": False}
-        ph = row["phone"] or ""
-        masked = ph[:4] + "•" * max(0, len(ph) - 6) + ph[-2:] if len(ph) > 6 else ph
         return {"linked": True, "name": row["name"], "username": row["username"],
-                "phone": masked, "connected": uid in self.clients}
+                "phone": row["phone"] or "", "connected": uid in self.clients}
+
+    async def health(self) -> list[dict]:
+        """Состояние всех привязанных аккаунтов - для админ-панели."""
+        out = []
+        for r in await db.list_accounts():
+            uid = r["user_id"]
+            c = self.clients.get(uid)
+            out.append({"id": uid, "name": r["username"] or r["name"] or "", "connected": bool(c and c.is_connected()),
+                        "retry": max(0, int(self._retry.get(uid, 0) - time.time()))})
+        return out
 
 
 manager = Accounts()

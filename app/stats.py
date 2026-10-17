@@ -129,7 +129,7 @@ async def user_info(uid: int) -> dict | None:
     threads = await db.user_threads(uid, 5)
     return {
         "id": uid, "username": u["username"], "access": _access_label(uid, u),
-        "allowed": bool(u["allowed"]), "admin": uid in config.ADMIN_IDS,
+        "allowed": bool(u["allowed"]), "admin": uid in config.ADMIN_IDS, "daily_limit": u.get("daily_limit"),
         "enabled": u["enabled"], "profit_mode": u["profit_mode"],
         "auto_ok": db.auto_allowed(u), "auto_state": u["auto_state"], "auto_sent": u["auto_sent"],
         "auto_limit": u["auto_limit"], "auto_gap": u["auto_gap"],

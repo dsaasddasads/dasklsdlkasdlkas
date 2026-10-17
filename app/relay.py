@@ -28,7 +28,7 @@ from telethon.errors import (
 from telethon.tl.functions.payments import GetUniqueStarGiftRequest
 from telethon.tl.types import InputPeerUser
 
-from . import accounts, config, db
+from . import accounts, config, db, settings
 
 log = logging.getLogger("relay")
 router = Router()
@@ -80,6 +80,34 @@ def _client(uid: int) -> TelegramClient | None:
     return accounts.manager.get(uid)
 
 
+RECONNECT = "Аккаунт переподключается к Telegram. Попробуй через минуту."
+
+
+def _need(uid: int) -> str:
+    """Почему нет клиента: не привязан или просто переподключается."""
+    return RECONNECT if accounts.manager.has(uid) else NEED_ACC
+
+
+def paused_until(uid: int) -> float:
+    """До какого времени отправка с аккаунта приостановлена (спам-лимит Telegram); 0 - не приостановлена."""
+    a = _accs.get(uid)
+    return a.paused_until if a and a.paused_until > time.time() else 0.0
+
+
+async def _limit(uid: int) -> int:
+    """Дневной лимит новых диалогов: индивидуальный (задаёт админ) или общий."""
+    u = await db.get_user(uid)
+    if u and u.get("daily_limit") is not None:
+        return u["daily_limit"]
+    return settings.get_int("relay_daily_limit")
+
+
+async def _over_limit(uid: int) -> bool:
+    if await db.count_threads(24, uid) >= await _limit(uid):
+        return True
+    return bool(config.RELAY_GLOBAL_DAILY) and await db.count_threads(24, None) >= config.RELAY_GLOBAL_DAILY
+
+
 # ---------- отправка ----------
 async def _api(client: TelegramClient, uid: int, request):
     """Запрос к Telegram от аккаунта человека с понятными ошибками."""
@@ -100,7 +128,7 @@ async def deliver(client: TelegramClient, uid: int, owner_id: int, owner_hash: i
     if time.time() < acc.paused_until:
         raise SendError("Отправка с твоего аккаунта приостановлена из-за ограничений Telegram. Попробуй позже.")
     async with acc.lock:
-        wait = acc.last + config.RELAY_MIN_GAP - time.monotonic()
+        wait = acc.last + settings.get_int("relay_min_gap") - time.monotonic()
         if wait > 0:
             await asyncio.sleep(wait)
         try:
@@ -172,13 +200,16 @@ async def _guard(c: CallbackQuery) -> bool:
     if not await _allowed(c.from_user.id):
         await c.answer("Нет доступа", show_alert=True)
         return False
+    if settings.get_bool("relay_paused"):
+        await c.answer("Отправка сообщений приостановлена админом", show_alert=True)
+        return False
     return True
 
 
 async def _send_first(message: Message, uid: int, slug: str, text: str, monitor) -> None:
     client = _client(uid)
     if not client:
-        return await message.answer(NEED_ACC)
+        return await message.answer(_need(uid))
     key = (uid, slug)
     if key in _inflight:
         return await message.answer("Уже отправляю…")
@@ -216,7 +247,7 @@ async def msg_start(c: CallbackQuery):
     if not await _guard(c):
         return
     if not _client(c.from_user.id):
-        return await c.answer(NEED_ACC, show_alert=True)
+        return await c.answer(_need(c.from_user.id), show_alert=True)
     slug = c.data[4:]
     g = await db.get_gift(slug)
     if not g or not g.get("owner_id"):
@@ -229,10 +260,8 @@ async def msg_start(c: CallbackQuery):
                 [InlineKeyboardButton(text="↩️ Продолжить диалог", callback_data=f"rep:{th['id']}")]])
             return await c.message.answer("Владелец уже отвечал. Продолжить диалог?", reply_markup=kb)
         return await c.answer("Ты уже писал этому владельцу — ждём ответ.", show_alert=True)
-    if await db.count_threads(24, c.from_user.id) >= config.RELAY_DAILY_LIMIT:
-        return await c.answer(f"Дневной лимит новых диалогов ({config.RELAY_DAILY_LIMIT}) исчерпан.", show_alert=True)
-    if await db.count_threads(24, None) >= config.RELAY_GLOBAL_DAILY:
-        return await c.answer("Общий дневной лимит новых диалогов исчерпан.", show_alert=True)
+    if await _over_limit(c.from_user.id):
+        return await c.answer(f"Дневной лимит новых диалогов ({await _limit(c.from_user.id)}) исчерпан.", show_alert=True)
     await c.answer()
     tpls = _tpls()
     lines = [f"<b>{i}.</b> {html.escape(_fmt(t, g))}" for i, t in enumerate(tpls, 1)]
@@ -250,7 +279,7 @@ async def tpl_pick(c: CallbackQuery, monitor):
     if not await _guard(c):
         return
     if not _client(c.from_user.id):
-        return await c.answer(NEED_ACC, show_alert=True)
+        return await c.answer(_need(c.from_user.id), show_alert=True)
     _, i, slug = c.data.split(":", 2)
     g = await db.get_gift(slug)
     tpls = _tpls()
@@ -265,7 +294,7 @@ async def own_start(c: CallbackQuery, state: FSMContext):
     if not await _guard(c):
         return
     if not _client(c.from_user.id):
-        return await c.answer(NEED_ACC, show_alert=True)
+        return await c.answer(_need(c.from_user.id), show_alert=True)
     await state.set_state(Compose.text)
     await state.update_data(slug=c.data[4:])
     await c.answer()
@@ -289,7 +318,7 @@ async def rep_start(c: CallbackQuery, state: FSMContext):
     if not await _guard(c):
         return
     if not _client(c.from_user.id):
-        return await c.answer(NEED_ACC, show_alert=True)
+        return await c.answer(_need(c.from_user.id), show_alert=True)
     tid = int(c.data[4:])
     th = await db.get_thread(tid)
     if not th or th["buyer_id"] != c.from_user.id:
@@ -311,7 +340,7 @@ async def rep_text(m: Message, state: FSMContext, monitor):
         return await m.answer("Нет доступа.")
     client = _client(m.from_user.id)
     if not client:
-        return await m.answer(NEED_ACC)
+        return await m.answer(_need(m.from_user.id))
     th = await db.get_thread(data["tid"])
     if not th or th["buyer_id"] != m.from_user.id:
         return await m.answer("Диалог не найден.")
@@ -345,9 +374,9 @@ def auto_text(u: dict, d: dict) -> str:
 def schedule_auto(bot: Bot, monitor, u: dict, d: dict) -> None:
     """Ставит задачу авто-сообщения владельцу подарка, который подошёл под фильтры пользователя."""
     uid = u["user_id"]
-    if not d.get("owner_id") or d["owner_id"] == uid or not _client(uid):
+    if not d.get("owner_id") or d["owner_id"] == uid or not _client(uid) or settings.get_bool("auto_paused"):
         return
-    limit = min(u["auto_limit"], config.AUTO_MAX)
+    limit = min(u["auto_limit"], settings.get_int("auto_max"))
     if u["auto_sent"] + _auto_pending.get(uid, 0) >= limit:
         return  # уже запланировано достаточно
     _auto_pending[uid] = _auto_pending.get(uid, 0) + 1
@@ -374,12 +403,11 @@ async def _auto_job(bot: Bot, monitor, uid: int, d: dict) -> None:
             if not client:
                 await db.auto_control(uid, "pause")
                 return await _tell(bot, uid, "🤖 Авто на паузе: аккаунт не привязан. " + NEED_ACC)
-            if u["auto_sent"] >= min(u["auto_limit"], config.AUTO_MAX):
+            if u["auto_sent"] >= min(u["auto_limit"], settings.get_int("auto_max")):
                 return
             if await db.thread_for(uid, d["owner_id"]):
                 return  # этому владельцу уже писали
-            if (await db.count_threads(24, uid) >= config.RELAY_DAILY_LIMIT
-                    or await db.count_threads(24, None) >= config.RELAY_GLOBAL_DAILY):
+            if await _over_limit(uid):
                 await db.auto_control(uid, "pause")
                 return await _tell(bot, uid, "🤖 Авто поставлен на паузу: достигнут дневной лимит новых диалогов.")
             wait = _auto_last.get(uid, 0.0) + u["auto_gap"] - time.monotonic()
@@ -398,7 +426,7 @@ async def _auto_job(bot: Bot, monitor, uid: int, d: dict) -> None:
                 return
             finally:
                 _auto_last[uid] = time.monotonic()
-            row = await db.auto_incr(uid)
+            row = await db.auto_incr(uid, settings.get_int("auto_max"))
             await db.log_event(uid, "msg_auto", d["slug"])
             msg = f"🤖 Авто: написал владельцу {title}. Отправлено {row['auto_sent']} из {row['auto_limit']}."
             if row["auto_state"] == "off":
@@ -413,13 +441,15 @@ async def _auto_job(bot: Bot, monitor, uid: int, d: dict) -> None:
 def auto_panel(u: dict) -> tuple[str, InlineKeyboardMarkup]:
     st = u["auto_state"]
     text = (f"🤖 <b>Авто-режим:</b> {STATE_LABEL.get(st, st)}\n"
-            f"Отправлено: {u['auto_sent']} из {min(u['auto_limit'], config.AUTO_MAX)}\n"
+            f"Отправлено: {u['auto_sent']} из {min(u['auto_limit'], settings.get_int('auto_max'))}\n"
             f"Пауза между сообщениями: {u['auto_gap']} с\n\n"
             "Бот сам пишет владельцам подарков, которые подошли под твои фильтры, пока не наберёт лимит. "
             "Сообщения уходят с твоего привязанного аккаунта. "
             "Настройки (лимит, пауза, текст) — в приложении, вкладка «Авто».")
     if not _client(u["user_id"]):
-        text += "\n\n⚠️ " + NEED_ACC
+        text += "\n\n⚠️ " + _need(u["user_id"])
+    if settings.get_bool("auto_paused"):
+        text += "\n\n⏸ Авто-режим приостановлен админом."
     if not u["enabled"]:
         text += "\n\n⚠️ Работа остановлена — нажми «▶ Начать работу», иначе подарки не приходят."
     B = InlineKeyboardButton
@@ -428,7 +458,7 @@ def auto_panel(u: dict) -> tuple[str, InlineKeyboardMarkup]:
     elif st == "paused":
         rows = [[B(text="▶ Продолжить", callback_data="auto:resume"), B(text="⏹ Стоп", callback_data="auto:stop")]]
     else:
-        rows = [[B(text=f"▶ Запустить на {min(u['auto_limit'], config.AUTO_MAX)}", callback_data="auto:start")]]
+        rows = [[B(text=f"▶ Запустить на {min(u['auto_limit'], settings.get_int('auto_max'))}", callback_data="auto:start")]]
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -449,8 +479,10 @@ async def auto_cb(c: CallbackQuery):
     action = c.data[5:]
     if action not in ("start", "pause", "resume", "stop"):
         return await c.answer()
+    if action in ("start", "resume") and settings.get_bool("auto_paused"):
+        return await c.answer("Авто-режим приостановлен админом", show_alert=True)
     if action == "start" and not _client(c.from_user.id):
-        return await c.answer(NEED_ACC, show_alert=True)
+        return await c.answer(_need(c.from_user.id), show_alert=True)
     u = await db.auto_control(c.from_user.id, action)
     await db.log_event(c.from_user.id, f"auto_{action}")
     text, kb = auto_panel(u)

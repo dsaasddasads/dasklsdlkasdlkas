@@ -78,6 +78,11 @@ CREATE TABLE IF NOT EXISTS accounts (
     username   TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_limit INT;
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     ts  TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -304,7 +309,7 @@ async def set_auto_ok(uid: int, ok: bool) -> None:
 
 
 async def set_auto_settings(uid: int, limit, gap, tpl, text: str) -> None:
-    limit = max(1, min(int(limit), config.AUTO_MAX))
+    limit = max(1, min(int(limit), 20))  # потолок задаёт админ (settings auto_max), здесь только общий предел
     gap = max(config.AUTO_MIN_GAP, min(int(gap), config.AUTO_MAX_GAP))
     tpl = max(0, int(tpl))
     await pool.execute(
@@ -323,12 +328,12 @@ async def auto_control(uid: int, action: str) -> dict | None:
     return dict(row) if row else await get_user(uid)
 
 
-async def auto_incr(uid: int) -> dict:
+async def auto_incr(uid: int, cap: int | None = None) -> dict:
     """+1 отправленное авто-сообщение; при достижении лимита режим сам выключается."""
     row = await pool.fetchrow(
         "UPDATE users SET auto_sent = auto_sent + 1, "
         "auto_state = CASE WHEN auto_sent + 1 >= LEAST(auto_limit, $2) THEN 'off' ELSE auto_state END "
-        "WHERE user_id=$1 RETURNING auto_sent, auto_limit, auto_state", uid, config.AUTO_MAX)
+        "WHERE user_id=$1 RETURNING auto_sent, auto_limit, auto_state", uid, cap or config.AUTO_MAX)
     return dict(row)
 
 
@@ -402,3 +407,40 @@ async def thread_for_reply(buyer_id: int, owner_id: int) -> dict | None:
         "SELECT * FROM threads WHERE buyer_id=$1 AND owner_id=$2 AND created_at > now() - interval '14 days' "
         "ORDER BY created_at DESC LIMIT 1", buyer_id, owner_id)
     return dict(row) if row else None
+
+
+async def account_owner(tg_id: int) -> int | None:
+    """Какой пользователь бота уже привязал этот Telegram-аккаунт."""
+    return await pool.fetchval("SELECT user_id FROM accounts WHERE tg_id=$1", tg_id)
+
+
+async def update_account_session(uid: int, session: str, phone: str | None) -> None:
+    await pool.execute("UPDATE accounts SET session=$2, phone=$3 WHERE user_id=$1", uid, session, phone)
+
+
+# ---------- настройки, которые меняет админ на ходу ----------
+async def load_settings() -> dict[str, str]:
+    return {r["key"]: r["value"] for r in await pool.fetch("SELECT key, value FROM settings")}
+
+
+async def set_setting(key: str, value: str | None) -> None:
+    if value is None or value == "":
+        await pool.execute("DELETE FROM settings WHERE key=$1", key)
+    else:
+        await pool.execute(
+            "INSERT INTO settings(key, value) VALUES($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+            key, value)
+
+
+async def set_daily_limit(uid: int, n: int | None) -> None:
+    await pool.execute("UPDATE users SET daily_limit=$2 WHERE user_id=$1", uid, n)
+
+
+async def admin_log(n: int = 20) -> list[dict]:
+    rows = await pool.fetch(
+        "SELECT ts, user_id, slug FROM events WHERE kind='admin' ORDER BY ts DESC LIMIT $1", n)
+    return [dict(r) for r in rows]
+
+
+async def auto_reset(uid: int) -> None:
+    await pool.execute("UPDATE users SET auto_sent=0 WHERE user_id=$1", uid)

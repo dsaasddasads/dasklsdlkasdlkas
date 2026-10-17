@@ -43,7 +43,7 @@ REQUIRE_OFFER = os.getenv("REQUIRE_OFFER", "1") == "1"        # только е�
 # Сообщения владельцам от имени юзербота (только по нажатию кнопки)
 RELAY = os.getenv("RELAY", "1") == "1"
 RELAY_DAILY_LIMIT = int(os.getenv("RELAY_DAILY_LIMIT", "15"))    # новых диалогов на человека за 24 ч
-RELAY_GLOBAL_DAILY = int(os.getenv("RELAY_GLOBAL_DAILY", "100"))  # новых диалогов всего за 24 ч
+RELAY_GLOBAL_DAILY = int(os.getenv("RELAY_GLOBAL_DAILY", "0"))    # новых диалогов всего за 24 ч (0 = без общего лимита)
 RELAY_MIN_GAP = float(os.getenv("RELAY_MIN_GAP", "20"))          # пауза между отправками, сек
 RELAY_TEMPLATES = [t.strip() for t in os.getenv("RELAY_TEMPLATES", "").split("||") if t.strip()]
 
@@ -51,3 +51,16 @@ RELAY_TEMPLATES = [t.strip() for t in os.getenv("RELAY_TEMPLATES", "").split("||
 AUTO_MAX = int(os.getenv("AUTO_MAX", "5"))              # макс. сообщений за один запуск
 AUTO_MIN_GAP = int(os.getenv("AUTO_MIN_GAP", "30"))     # мин. пауза между авто-сообщениями, сек
 AUTO_MAX_GAP = int(os.getenv("AUTO_MAX_GAP", "600"))
+
+# Кому можно написать (к ONLY_CONTACTABLE): нужен username; владельцев с "только Premium"/платными сообщениями отсекаем
+REQUIRE_USERNAME = os.getenv("REQUIRE_USERNAME", "1") == "1"
+ALLOW_RESTRICTED = os.getenv("ALLOW_RESTRICTED", "0") == "1"
+
+# Привязка личных аккаунтов: SESSION_KEY - ключ шифрования сессий (длинная случайная строка, не менее 16 символов).
+# Без него новые аккаунты привязать нельзя. После задания ключа старые привязки перешифруются автоматически.
+SESSION_KEY = os.getenv("SESSION_KEY", "").strip()
+LINK_ATTEMPTS = int(os.getenv("LINK_ATTEMPTS", "5"))   # попыток запросить код на человека в час
+
+# Цены Portals (публичный API, GRAM). PORTALS=0 - выключить
+PORTALS = os.getenv("PORTALS", "1") == "1"
+PORTALS_DISCOUNT = float(os.getenv("PORTALS_DISCOUNT", "15"))  # листинг дешевле Portals на столько % = выгодно

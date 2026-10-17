@@ -8,7 +8,7 @@ from aiohttp import web
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
-from . import accounts, bot as botmod, config, db, relay, stats
+from . import accounts, bot as botmod, config, db, relay, settings, stats
 from .monitor import Monitor
 from .web import make_app
 
@@ -46,9 +46,12 @@ async def main() -> None:
 
     monitor = Monitor(client, on_gift, alert)
 
+    await settings.load()  # настройки админа: паузы, лимиты
     accounts.manager.bind_bot(bot)
+    bg: list[asyncio.Task] = []
     if config.RELAY:
         await accounts.manager.start()  # подключаем привязанные аккаунты людей
+        bg.append(asyncio.create_task(accounts.manager.keepalive()))  # и поднимаем отвалившиеся
 
     dp = Dispatcher()
     dp.include_router(botmod.router)
@@ -56,7 +59,8 @@ async def main() -> None:
     dp.include_router(stats.router)
     dp["monitor"] = monitor
 
-    runner = web.AppRunner(make_app(bot))
+    bg.append(asyncio.create_task(settings.run()))
+    runner = web.AppRunner(make_app(bot, monitor))
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", config.PORT).start()
 
