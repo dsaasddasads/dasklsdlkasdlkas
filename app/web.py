@@ -14,6 +14,7 @@ from aiogram import Bot
 from . import accounts, bot as botmod, config, db, relay, settings, stats
 
 INDEX = Path(__file__).parent / "webapp" / "index.html"
+BUILD = "2026-10-17"  # метка версии: видна внизу главной и по адресу /health
 
 
 def verify(init_data: str) -> dict | None:
@@ -83,10 +84,10 @@ def make_app(bot: Bot, monitor=None) -> web.Application:
         return u
 
     async def index(_):
-        return web.FileResponse(INDEX)
+        return web.FileResponse(INDEX, headers={"Cache-Control": "no-store"})  # чтобы Telegram не держал старую страницу
 
     async def health(_):
-        return web.Response(text="ok")
+        return web.Response(text=f"ok build {BUILD}")
 
     async def me(request):
         u = await auth(request)
